@@ -373,31 +373,7 @@ class Household:
         # Set the action space
         self.action_space = gym.spaces.Dict(temp_action_space)
 
-    # Handle generator observations
-    def __get_generator_observations__(self) -> dict:
-        """
-        Get the observations for one generator
-        :return: dict
-        """
-
-        if self.generator is None:
-            return {}
-
-        generator_observations: dict = {
-            'current_available_energy': np.array([self.current_available_energy],
-                                                 dtype=np.float32),
-            'current_buy_price': np.array([self.aggregator.import_cost[self.current_timestep]],
-                                          dtype=np.float32),
-            'current_sell_price': np.array([self.aggregator.export_cost[self.current_timestep]],
-                                           dtype=np.float32),
-            'current_loads': np.array([self.load_consumption[self.current_timestep]],
-                                      dtype=np.float32)
-        }
-
-        return generator_observations
-
-        # Create Generator Action Space
-
+    # Create Generator Action Space
     def __create_generator_actions__(self) -> dict:
         """
         Create the action space for the generators
@@ -458,36 +434,8 @@ class Household:
 
         return cost, penalty
 
-        # Create Storage Observation Space
 
-    # Handle storage observations
-    def __get_storage_observations__(self) -> dict:
-        """
-        Get the observations for the storages
-        :param storage: storage resource to get the observations
-        :return: dict
-        """
-        if self.storage is None:
-            return {}
-
-        storage_observations: dict = {
-            'current_soc': np.array([self.storage.value[self.current_timestep - 1] if self.current_timestep > 0
-                                     else self.storage.initial_charge],
-                                    dtype=np.float32),
-            'current_available_energy': np.array([self.current_available_energy],
-                                                 dtype=np.float32),
-            'current_loads': np.array([self.load_consumption[self.current_timestep]],
-                                      dtype=np.float32),
-            'current_buy_price': np.array([self.aggregator.import_cost[self.current_timestep]],
-                                          dtype=np.float32),
-            'current_sell_price': np.array([self.aggregator.export_cost[self.current_timestep]],
-                                           dtype=np.float32)
-        }
-
-        return storage_observations
-
-        # Create Storage Action Space
-
+    # Create Storage Action Space
     def __create_storage_actions__(self) -> dict:
         """
         Create the action space for the storages
@@ -603,25 +551,8 @@ class Household:
 
         return cost, penalty
 
-    # Handle aggregator observations
 
-    def __get_aggregator_observations__(self) -> dict:
-        """
-        Get the observations for the aggregator
-        :return: dict
-        """
-
-        return {
-            'current_buy_price': np.array([self.aggregator.import_cost[self.current_timestep]],
-                                          dtype=np.float32),
-            'current_sell_price': np.array([self.aggregator.export_cost[self.current_timestep]],
-                                           dtype=np.float32),
-            'current_available_energy': np.array([self.current_available_energy],
-                                                 dtype=np.float32)
-        }
-
-        # Create Aggregator Action Space
-
+    # Create Aggregator Action Space
     def __create_aggregator_actions__(self) -> dict:
         """
         Create the action space for the aggregator
@@ -723,12 +654,21 @@ class Household:
         if self.current_timestep >= self.load.value.shape[0]:
             return observations
 
-        if self.generator is not None:
-            observations += self.__get_generator_observations__()
+        observations: dict = {
+            'current_available_energy': np.array([self.current_available_energy],
+                                                 dtype=np.float32),
+            'current_buy_price': np.array([self.aggregator.import_cost[self.current_timestep]],
+                                          dtype=np.float32),
+            'current_sell_price': np.array([self.aggregator.export_cost[self.current_timestep]],
+                                           dtype=np.float32),
+            'current_loads': np.array([self.load_consumption[self.current_timestep]],
+                                      dtype=np.float32)
+        }
         if self.storage is not None:
-            observations += self.__get_storage_observations__()
-
-        observations += self.__get_aggregator_observations__()
+            observations['current_soc'] = np.array(
+                [self.storage.value[self.current_timestep - 1] if self.current_timestep > 0
+                 else self.storage.initial_charge],
+                dtype=np.float32)
 
         return observations
 
@@ -777,8 +717,6 @@ class Household:
         observations = self.__get_next_observations__()
 
         return observations, {}
-
-
 
         # Handle action execution
 
