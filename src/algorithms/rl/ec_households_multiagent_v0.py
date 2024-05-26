@@ -9,40 +9,21 @@ from src.algorithms.rl.utils import separate_resources
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 
 
-class EnergyCommunityMultiEnvHouseholds_v0(MultiAgentEnv):
-    """
-    Energy Community Environment for multi-agent reinforcement learning
-    Generators can be renewable or non-renewable:
-    - Renewable generators can be controlled, but not switched on/off
-    - Non-renewable generators can be switched on/off, but not controlled
-    Loads are fixed
-    Storages can be controlled
-    - Storages can be idle, charged or discharged
-    - No efficiencies are considered (100% efficiency)
-    EVs can be controlled
-    - EVs can be charged or discharged
-    - EVs can be connected or disconnected
-    - EVs will charge/discharge depending on energy price
-    Import/Export can be controlled with an input price
+class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
 
-    Rewards are attributed to the community as a whole
-    Rewards are based on the following:
-    - Total energy consumption
-    - Total energy production
-    - Total energy storage
-    - Total energy import
-    - Total energy export
-    """
-
-    metadata = {'name': 'EnergyCommunityMultiEnvHouseholds-v0'}
+    metadata = {'name': 'EnergyCommunityMultiHouseholdsEnv_v0'}
 
     def __init__(self, households_resources: list[list[BaseResource]],
                  import_penalty,
                  export_penalty,
                  storage_action_reward,
                  storage_action_penalty,
-                 balance_penalty):
+                 balance_penalty,
+                 max_timesteps):
         super().__init__()
+
+        # Define the maximum number of timesteps to simulate
+        self. max_timesteps = max_timesteps
 
         # Define the resources
         self.households_resources = deepcopy(households_resources)
@@ -55,8 +36,14 @@ class EnergyCommunityMultiEnvHouseholds_v0(MultiAgentEnv):
                                                   storage_action_penalty,
                                                   balance_penalty)
         self.households_ids = set(self.households)
-        # Calculate the sum of loads for each timestep
-        self.load_consumption = np.sum([load.value for load in self.loads], axis=0)
+
+        # Initialize action space for each household
+        self._create_action_space()
+
+        # # Calculate total laods
+        # self.total_loads =
+        # # Calculate the sum of loads for each timestep
+        # self.load_consumption = np.sum([load.value for load in self.loads], axis=0)
 
         # Initialize time counter
         self.current_timestep: int = 0
@@ -65,14 +52,17 @@ class EnergyCommunityMultiEnvHouseholds_v0(MultiAgentEnv):
         self.current_total_production: float = 0
         self.current_total_consumption: float = 0
 
-        # Initialize variables for currently available energy
-        self.current_total_available_energy: float = 0
+        # # Initialize variables for currently available energy
+        # self.current_total_available_energy: float = 0
 
         # Costs for each resource
         self.total_accumulated_generator_cost: float = 0.0
         self.total_accumulated_storage_cost: float = 0.0
         self.total_accumulated_import_cost: float = 0.0
         self.total_accumulated_export_cost: float = 0.0
+
+        # Rewards
+        self.storage_action_reward = storage_action_reward
 
         # Penalties
         self.storage_action_penalty = storage_action_penalty
@@ -103,7 +93,7 @@ class EnergyCommunityMultiEnvHouseholds_v0(MultiAgentEnv):
                            balance_penalty):
         households = {}
         for i, resources in enumerate(households_resources):
-            households[i] = Household(i, resources, import_penalty,
+            households[i] = Household(i, resources, self, import_penalty,
                                       export_penalty,
                                       storage_action_reward,
                                       storage_action_penalty,
@@ -111,6 +101,13 @@ class EnergyCommunityMultiEnvHouseholds_v0(MultiAgentEnv):
 
         return households
 
+    def _create_action_space(self):
+        self._action_space_in_preferred_format = True
+        temp_action_space = {}
+        for id in self.households:
+            temp_action_space[id] = self.households[id].action_space
+
+        self.action_space = gym.spaces.Dict(temp_action_space)
     # Reset environment
     def reset(self, *, seed=None, options=None):
 
@@ -127,7 +124,7 @@ class EnergyCommunityMultiEnvHouseholds_v0(MultiAgentEnv):
         self.households_ids = set(self.households)
 
         # Set the initial pool of available energy to load consumption at the first timestep
-        self.current_total_available_energy = -self.load_consumption[0]
+        # self.current_total_available_energy = -self.load_consumption[0]
 
         # Reset environment variables
         self.current_timestep = 0
@@ -169,7 +166,7 @@ class EnergyCommunityMultiEnvHouseholds_v0(MultiAgentEnv):
         """
 
         # Check for completion of the episode
-        if self.current_timestep >= self.loads[0].value.shape[0]:
+        if self.current_timestep >= self.max_timesteps:
             terminateds, truncateds = self._log_ending(True)
             observations, reward, info = {}, {}, {}
 
@@ -198,7 +195,7 @@ class EnergyCommunityMultiEnvHouseholds_v0(MultiAgentEnv):
                     execute_action(action_dict[action_id])
 
                 # Log the agent
-                self._log_households(deepcopy(self.households[action_id]))
+                # self._log_households(deepcopy(self.households[action_id]))
 
                 # Calculate the true reward
                 self.current_real_reward[action_id] = self.households[action_id].calculate_reward(action_result_00,
@@ -207,28 +204,33 @@ class EnergyCommunityMultiEnvHouseholds_v0(MultiAgentEnv):
                 summed_available_energy += self.households[action_id].current_available_energy
                 info[action_id] = self.households[action_id].log_info()
 
-            # Update the timestep
-            self.current_timestep += 1
 
             self.balance_history.append(summed_available_energy)
             self.history.append(self.history_dictionary)
 
             # Terminations and truncations
             terminateds, truncateds = self._log_ending(False)
-
-            # Check for end of episode
-            if self.current_timestep >= self.loads[0].value.shape[0]:
-                terminateds, truncateds = self._log_ending(True)
+            #
+            # # Check for end of episode
+            # if self.current_timestep >= self.max_timesteps:
+            #     terminateds, truncateds = self._log_ending(True)
 
             next_obs = self._get_households_observations()
+
+
+            # Update the timestep
+            self.current_timestep += 1
 
             return next_obs, self.current_real_reward, terminateds, truncateds, info
 
         # Terminations and truncations
-        terminateds = {a: False for a in self.agents}
+        terminateds = {a: False for a in self.households}
         terminateds['__all__'] = False
-        truncateds = {a: False for a in self.agents}
+        truncateds = {a: False for a in self.households}
         truncateds['__all__'] = False
+
+        # Update the timestep
+        self.current_timestep += 1
 
         return observations, reward, terminateds, truncateds, info
 
@@ -243,7 +245,7 @@ class EnergyCommunityMultiEnvHouseholds_v0(MultiAgentEnv):
         # Get the observation for the next resource
         observations = {}
 
-        if self.current_timestep >= self.loads[0].value.shape[0]:
+        if self.current_timestep >= self.max_timesteps:
             return observations
 
         for household_id in self.households.keys():
@@ -253,9 +255,9 @@ class EnergyCommunityMultiEnvHouseholds_v0(MultiAgentEnv):
 
     # Log ending of episode
     def _log_ending(self, flag: bool) -> tuple[dict, dict]:
-        terminateds = {a: flag for a in self.agents}
+        terminateds = {a: flag for a in self.households}
         terminateds['__all__'] = flag
-        truncateds = {a: flag for a in self.agents}
+        truncateds = {a: flag for a in self.households}
         truncateds['__all__'] = flag
 
         return terminateds, truncateds
@@ -269,13 +271,19 @@ class EnergyCommunityMultiEnvHouseholds_v0(MultiAgentEnv):
 
 
 class Household:
-    def __init__(self, id: int, resources: list[BaseResource], import_penalty, export_penalty, storage_action_reward,
+    def __init__(self, id: int, resources: list[BaseResource], environment: EnergyCommunityMultiHouseholdsEnv_v0, import_penalty, export_penalty, storage_action_reward,
                  storage_action_penalty, balance_penalty):
+        # Define the used environment (for features like timestep tracking)
+        self.environment = environment
+
         # Define the resources
         self.resources = deepcopy(resources)
 
         # Define the household id
         self.id = id
+
+        # Define current timestep
+        self.current_production = 0
 
         # Split the incoming resources
         temp_resources = separate_resources(self.resources)
@@ -284,8 +292,12 @@ class Household:
         self.storage = temp_resources['storages'][0] if len(temp_resources['storages']) else None
         self.aggregator = temp_resources['aggregator'][0]  # required
 
-        # Calculate the sum of loads for each timestep
-        self.load_consumption = np.sum(self.load.value, axis=0)
+        # Define max timestep
+        self.max_timestep = self.aggregator.exports.shape[0]
+
+        # TODO: This should go into environment?
+        # # Calculate the sum of loads for each timestep
+        # self.load_consumption = np.sum(self.load.value, axis=0)
 
         # Initialize variables for production and consumption
         self.current_production: float = 0
@@ -334,8 +346,7 @@ class Household:
         # Current real reward
         self.current_real_reward = {}
 
-        # Handle Observation Space
-
+    # Handle Observation Space
     def _handle_observation_space(self) -> None:
         # Observation space
         self._obs_space_in_preferred_format = True
@@ -361,14 +372,14 @@ class Household:
 
         # Generator action space
         if self.generator is not None:
-            temp_action_space += self.__create_generator_actions__()
+            temp_action_space.update(self.__create_generator_actions__())
 
         # Storage action space
         if self.storage is not None:
-            temp_action_space += self.__create_storage_actions__()
+            temp_action_space.update(self.__create_storage_actions__())
 
         # Aggregator action space
-        temp_action_space += self.__create_aggregator_actions__()
+        temp_action_space.update( self.__create_aggregator_actions__())
 
         # Set the action space
         self.action_space = gym.spaces.Dict(temp_action_space)
@@ -417,20 +428,20 @@ class Household:
         # Check if actions has active or production
         if 'active' in actions.keys():
             produced_energy = (actions['active'] *
-                               self.generator.upper_bound[self.current_timestep])
+                               self.generator.upper_bound[self.environment.current_timestep])
         elif 'production' in actions.keys():
             produced_energy = (actions['production'][0] *
-                               self.generator.upper_bound[self.current_timestep])
+                               self.generator.upper_bound[self.environment.current_timestep])
 
         # Attribute the produced energy to the generator
-        self.generator.value[self.current_timestep] = produced_energy
+        self.generator.value[self.environment.current_timestep] = produced_energy
         self.current_production += produced_energy
         self.current_available_energy += produced_energy
 
         # Update on the resource
-        self.generator.value[self.current_timestep] = produced_energy
+        self.generator.value[self.environment.current_timestep] = produced_energy
 
-        cost: float = self.generator.upper_bound[self.current_timestep] - produced_energy
+        cost: float = self.generator.upper_bound[self.environment.current_timestep] - produced_energy
 
         return cost, penalty
 
@@ -472,15 +483,15 @@ class Household:
         penalty: float = 0.0
 
         # Check if it is the first timestep
-        if self.current_timestep == 0:
-            self.storage.value[self.current_timestep] = self.storage.initial_charge
+        if self.environment.current_timestep == 0:
+            self.storage.value[self.environment.current_timestep] = self.storage.initial_charge
         else:
-            self.storage.value[self.current_timestep] = self.storage.value[self.current_timestep - 1]
+            self.storage.value[self.environment.current_timestep] = self.storage.value[self.environment.current_timestep - 1]
 
         # Idle state
         if actions['ctl'] == 0:
-            self.storage.charge[self.current_timestep] = 0.0
-            self.storage.discharge[self.current_timestep] = 0.0
+            self.storage.charge[self.environment.current_timestep] = 0.0
+            self.storage.discharge[self.environment.current_timestep] = 0.0
 
             return cost, penalty
 
@@ -490,16 +501,16 @@ class Household:
             charge = actions['value'][0]
 
             # Set the charge as a percentage of the maximum charge allowed
-            charge = charge * self.storage.charge_max[self.current_timestep] / self.storage.capacity_max
+            charge = charge * self.storage.charge_max/ self.storage.capacity_max
 
-            if self.storage.value[self.current_timestep] + charge > 1.0:
+            if self.storage.value[self.environment.current_timestep] + charge > 1.0:
                 # Calculate the deviation from the bounds
-                deviation = self.storage.value[self.current_timestep] + charge - 1.0
-                charge = 1.0 - self.storage.value[self.current_timestep]
+                deviation = self.storage.value[self.environment.current_timestep] + charge - 1.0
+                charge = 1.0 - self.storage.value[self.environment.current_timestep]
                 penalty = deviation
 
             # Get the cost of the energy
-            # cost = charge * storage.cost_charge[self.current_timestep]
+            # cost = charge * storage.cost_charge[self.environment.current_timestep]
 
             # Heavily penalize the storage action if it requires importing energy
             if self.current_available_energy - charge * self.storage.capacity_max < 0:
@@ -511,9 +522,9 @@ class Household:
             self.current_available_energy -= charge * self.storage.capacity_max
 
             # Update as well on the resource
-            self.storage.value[self.current_timestep] += charge
-            self.storage.charge[self.current_timestep] = charge
-            self.storage.discharge[self.current_timestep] = 0.0
+            self.storage.value[self.environment.current_timestep] += charge
+            self.storage.charge[self.environment.current_timestep] = charge
+            self.storage.discharge[self.environment.current_timestep] = 0.0
 
             return cost, penalty
 
@@ -522,27 +533,27 @@ class Household:
             discharge = actions['value'][0]
 
             # Set discharge as a percentage of the maximum discharge allowed
-            discharge = discharge * self.storage.discharge_max[self.current_timestep] / self.storage.capacity_max
+            discharge = discharge * self.storage.discharge_max / self.storage.capacity_max
 
-            if self.storage.value[self.current_timestep] - discharge < 0.0:
+            if self.storage.value[self.environment.current_timestep] - discharge < 0.0:
                 # Calculate the deviation from the bounds
-                deviation = abs(self.storage.value[self.current_timestep] - discharge)
-                discharge = self.storage.value[self.current_timestep]
+                deviation = abs(self.storage.value[self.environment.current_timestep] - discharge)
+                discharge = self.storage.value[self.environment.current_timestep]
                 penalty = deviation
 
             # Get the cost of the energy
-            # cost = discharge * storage.cost_discharge[self.current_timestep]
-            cost = self.storage.discharge_max[self.current_timestep] - discharge * self.storage.capacity_max
+            # cost = discharge * storage.cost_discharge[self.environment.current_timestep]
+            cost = self.storage.discharge_max - discharge * self.storage.capacity_max
 
             # Assign resource charge and discharge variables
-            self.storage.value[self.current_timestep] -= discharge
-            self.storage.charge[self.current_timestep] = 0.0
-            self.storage.discharge[self.current_timestep] = discharge
+            self.storage.value[self.environment.current_timestep] -= discharge
+            self.storage.charge[self.environment.current_timestep] = 0.0
+            self.storage.discharge[self.environment.current_timestep] = discharge
 
             # Update as well on the resource
-            self.storage.value[self.current_timestep] -= discharge
-            self.storage.charge[self.current_timestep] = 0.0
-            self.storage.discharge[self.current_timestep] = discharge
+            self.storage.value[self.environment.current_timestep] -= discharge
+            self.storage.charge[self.environment.current_timestep] = 0.0
+            self.storage.discharge[self.environment.current_timestep] = discharge
 
             # Add the energy to the pool
             self.current_available_energy += discharge * self.storage.capacity_max
@@ -592,23 +603,23 @@ class Household:
             # Force to export
             # 1 - Get the deviation from the bounds
             to_export = self.current_available_energy
-            if to_export > self.aggregator.export_max[self.current_timestep]:
-                deviation = to_export - self.aggregator.export_max[self.current_timestep]
-                to_export = self.aggregator.export_max[self.current_timestep]
+            if to_export > self.aggregator.export_max[self.environment.current_timestep]:
+                deviation = to_export - self.aggregator.export_max[self.environment.current_timestep]
+                to_export = self.aggregator.export_max[self.environment.current_timestep]
                 penalty = deviation
 
             # 2 - Set the exports for agent and resource
-            self.aggregator.imports[self.current_timestep] = 0.0
-            self.aggregator.exports[self.current_timestep] = to_export
+            self.aggregator.imports[self.environment.current_timestep] = 0.0
+            self.aggregator.exports[self.environment.current_timestep] = to_export
 
-            self.aggregator.imports[self.current_timestep] = 0.0
-            self.aggregator.exports[self.current_timestep] = to_export
+            self.aggregator.imports[self.environment.current_timestep] = 0.0
+            self.aggregator.exports[self.environment.current_timestep] = to_export
 
             # 3 - Update the available energy pool
             self.current_available_energy -= to_export
 
             # Update the cost of the export
-            cost = to_export * self.aggregator.export_cost[self.current_timestep]
+            cost = to_export * self.aggregator.export_cost[self.environment.current_timestep]
 
             return -cost, penalty
 
@@ -617,24 +628,24 @@ class Household:
 
             # If not, we are forced to import
             to_import = abs(self.current_available_energy)
-            if to_import > self.aggregator.import_max[self.current_timestep]:
+            if to_import > self.aggregator.import_max[self.environment.current_timestep]:
                 # Calculate the deviation from the bounds
-                deviation = to_import - self.aggregator.import_max[self.current_timestep]
-                to_import = self.aggregator.import_max[self.current_timestep]
+                deviation = to_import - self.aggregator.import_max[self.environment.current_timestep]
+                to_import = self.aggregator.import_max[self.environment.current_timestep]
                 penalty = deviation
 
             # Set the imports for agent and resource
-            self.aggregator.imports[self.current_timestep] = to_import
-            self.aggregator.exports[self.current_timestep] = 0.0
+            self.aggregator.imports[self.environment.current_timestep] = to_import
+            self.aggregator.exports[self.environment.current_timestep] = 0.0
 
-            self.aggregator.imports[self.current_timestep] = to_import
-            self.aggregator.exports[self.current_timestep] = 0.0
+            self.aggregator.imports[self.environment.current_timestep] = to_import
+            self.aggregator.exports[self.environment.current_timestep] = 0.0
 
             # Update the available energy pool
             self.current_available_energy += to_import
 
             # Get the associated costs of importation
-            cost = to_import * self.aggregator.import_cost[self.current_timestep]
+            cost = to_import * self.aggregator.import_cost[self.environment.current_timestep]
 
             return cost, penalty
 
@@ -651,22 +662,22 @@ class Household:
         # Get the observation for the next resource
         observations = {}
 
-        if self.current_timestep >= self.load.value.shape[0]:
+        if self.environment.current_timestep >= self.load.value.shape[0]:
             return observations
 
         observations: dict = {
             'current_available_energy': np.array([self.current_available_energy],
                                                  dtype=np.float32),
-            'current_buy_price': np.array([self.aggregator.import_cost[self.current_timestep]],
+            'current_buy_price': np.array([self.aggregator.import_cost[self.environment.current_timestep]],
                                           dtype=np.float32),
-            'current_sell_price': np.array([self.aggregator.export_cost[self.current_timestep]],
+            'current_sell_price': np.array([self.aggregator.export_cost[self.environment.current_timestep]],
                                            dtype=np.float32),
-            'current_loads': np.array([self.load_consumption[self.current_timestep]],
+            'current_loads': np.array([self.load.value[self.environment.current_timestep]],
                                       dtype=np.float32)
         }
         if self.storage is not None:
             observations['current_soc'] = np.array(
-                [self.storage.value[self.current_timestep - 1] if self.current_timestep > 0
+                [self.storage.value[self.environment.current_timestep - 1] if self.environment.current_timestep > 0
                  else self.storage.initial_charge],
                 dtype=np.float32)
 
@@ -690,7 +701,7 @@ class Household:
         self.current_available_energy = -self.load_consumption[0]
 
         # Reset environment variables
-        self.current_timestep = 0
+        self.environment.current_timestep = 0
         self.current_production = 0
         self.current_consumption = 0
         self.current_available_energy = 0
@@ -779,22 +790,22 @@ class Household:
 
         # Generator
         if self.generator is not None:
-            info += {
+            info.update( {
                 'generator_cost': self.accumulated_generator_cost,
                 'generator_penalty': self.accumulated_generator_penalty
-            }
+            })
 
         # Storages
         if self.storage is not None:
-            info += {
+            info.update({
                 'storage_cost': self.accumulated_storage_cost,
                 'storage_penalty': self.accumulated_storage_penalty
-            }
+            })
 
         # Aggregator
-        info += {
+        info.update({
             'aggregator_cost': self.accumulated_import_cost + self.accumulated_export_cost,
             'aggregator_penalty': self.accumulated_import_penalty + self.accumulated_export_penalty
-        }
+        })
 
         return info

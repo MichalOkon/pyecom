@@ -15,7 +15,7 @@ class Generator(BaseResource):
                  cost: np.array,
                  cost_nde: np.array,
                  is_renewable: Union[np.array, bool]):
-        super().__init__(name, value, lower_bound, upper_bound, cost)
+        super().__init__(name, value)
 
         self.is_renewable = is_renewable
         self.is_active = np.zeros(self.value.shape) \
@@ -24,6 +24,10 @@ class Generator(BaseResource):
         self.gen_nde = np.zeros(self.value.shape) \
             if isinstance(value, np.ndarray) else 0.0
         self.cost_nde = cost_nde
+
+        self.lower_bound = lower_bound
+        self.upper_bound = upper_bound
+        self.cost = cost
 
     def sample(self, method: str = 'normal') -> np.array:
         """

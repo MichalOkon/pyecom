@@ -23,16 +23,9 @@ class BaseResource:
 
     def __init__(self,
                  name: str,
-                 value: np.array,
-                 lower_bound: np.array,
-                 upper_bound: np.array,
-                 cost: np.array):
+                 value: np.array):
         self.name = name
         self.value = value
-        self.lower_bound = lower_bound
-        self.upper_bound = upper_bound
-        self.cost = cost
-
     def __repr__(self):
         return f'{self.name}'
 

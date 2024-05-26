@@ -10,13 +10,10 @@ class Load(BaseResource):
     def __init__(self,
                  name: str,
                  value: np.array,
-                 lower_bound: np.array,
-                 upper_bound: np.array,
-                 cost: np.array,
                  cost_reduce: np.array,
                  cost_cut: np.array,
                  cost_ens: np.array):
-        super().__init__(name, value, lower_bound, upper_bound, cost)
+        super().__init__(name, value)
 
         self.cost_reduce = cost_reduce
         self.cost_cut = cost_cut

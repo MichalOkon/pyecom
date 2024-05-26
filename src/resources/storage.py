@@ -9,21 +9,18 @@ class Storage(BaseResource):
     def __init__(self,
                  name: str,
                  value: Union[np.array, float],
-                 lower_bound: np.array,
-                 upper_bound: np.array,
-                 cost: np.array,
                  cost_discharge: np.array,
                  cost_charge: np.array,
-                 capacity_max: np.array,
-                 capacity_min: np.array,
-                 initial_charge: np.array,
-                 discharge_efficiency: np.array,
-                 discharge_max: np.array,
-                 charge_efficiency: np.array,
-                 charge_max: np.array,
-                 capital_cost: np.array,
+                 capacity_max: float,
+                 capacity_min: float,
+                 initial_charge: float,
+                 discharge_efficiency: float,
+                 discharge_max: float,
+                 charge_efficiency: float,
+                 charge_max: float,
+                 capital_cost: float,
                  ):
-        super().__init__(name, value, lower_bound, upper_bound, cost)
+        super().__init__(name, value)
 
         self.capacity_max = capacity_max
         self.capacity_min = capacity_min
