@@ -1,3 +1,4 @@
+import string
 from typing import Union
 
 import gymnasium as gym
@@ -40,6 +41,9 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         # Initialize action space for each household
         self._create_action_space()
 
+        # Initialize observation space for each household
+        self._create_observation_space()
+
         # # Calculate total laods
         # self.total_loads =
         # # Calculate the sum of loads for each timestep
@@ -78,10 +82,9 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
 
         # Balance history
         self.balance_history = []
+        self.reward_history = []
+        self.final_logs = {}
 
-        # History of the environment
-        self.history = []
-        self.history_dictionary = {}
 
         # Current real reward
         self.current_real_reward = {}
@@ -108,6 +111,15 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
             temp_action_space[id] = self.households[id].action_space
 
         self.action_space = gym.spaces.Dict(temp_action_space)
+
+    def _create_observation_space(self):
+        self._onservation_space_in_preferred_format = True
+        temp_observation_space = {}
+        for id in self.households:
+            temp_observation_space[id] = self.households[id].observation_space
+
+        self.observation_space = gym.spaces.Dict(temp_observation_space)
+
     # Reset environment
     def reset(self, *, seed=None, options=None):
 
@@ -144,8 +156,8 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
 
         # Clear the history
         self.balance_history = []
-        self.history = []
-        self.history_dictionary = {}
+        self.reward_history = []
+        self.final_logs = {}
 
         observations = self._get_households_observations()
 
@@ -191,23 +203,20 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
             # Do the actions
             for action_id in action_dict.keys():
                 # Execute the actions
-                action_result_00, action_result_01, action_result_02 = self.households[action_id]. \
+                cost, penalty = self.households[action_id]. \
                     execute_action(action_dict[action_id])
 
                 # Log the agent
                 # self._log_households(deepcopy(self.households[action_id]))
 
                 # Calculate the true reward
-                self.current_real_reward[action_id] = self.households[action_id].calculate_reward(action_result_00,
-                                                                                                  action_result_01,
-                                                                                                  action_result_02)
+                self.current_real_reward[action_id] = self.households[action_id].calculate_reward(cost,
+                                                                                                  penalty)
                 summed_available_energy += self.households[action_id].current_available_energy
                 info[action_id] = self.households[action_id].log_info()
 
-
             self.balance_history.append(summed_available_energy)
-            self.history.append(self.history_dictionary)
-
+            self.reward_history.append(self.current_real_reward)
             # Terminations and truncations
             terminateds, truncateds = self._log_ending(False)
             #
@@ -216,7 +225,6 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
             #     terminateds, truncateds = self._log_ending(True)
 
             next_obs = self._get_households_observations()
-
 
             # Update the timestep
             self.current_timestep += 1
@@ -249,29 +257,73 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
             return observations
 
         for household_id in self.households.keys():
-            observations[household_id] = self.households[household_id].__get_next_observations__()
+            observations[household_id] = self.households[household_id].get_next_observations()
 
         return observations
 
     # Log ending of episode
-    def _log_ending(self, flag: bool) -> tuple[dict, dict]:
-        terminateds = {a: flag for a in self.households}
-        terminateds['__all__'] = flag
-        truncateds = {a: flag for a in self.households}
-        truncateds['__all__'] = flag
+    def _log_ending(self, is_over_flag: bool) -> tuple[dict, dict]:
+        terminateds = {a: is_over_flag for a in self.households}
+        terminateds['__all__'] = is_over_flag
+        truncateds = {a: is_over_flag for a in self.households}
+        truncateds['__all__'] = is_over_flag
+
+        if is_over_flag:
+            self.log_final_values()
 
         return terminateds, truncateds
 
-    # Log actions
-    def _log_households(self, household):
 
-        self.history_dictionary[household.id] = household
+    # Log final values
+    def log_final_values(self):
+        logs = {}
 
-        return
+        # Aggregate values from different households
+        total_imported_energy = [0.0] * self.max_timesteps
+        total_exported_energy = [0.0] * self.max_timesteps
+        for timestep in range(self.max_timesteps):
+            timestep_imported_energy = 0.0
+            timestep_exported_energy = 0.0
+            for household_id in self.households:
+                timestep_imported_energy += self.households[household_id].aggregator.imports[timestep]
+                timestep_exported_energy += self.households[household_id].aggregator.exports[timestep]
+            total_exported_energy[timestep] = timestep_exported_energy
+            total_imported_energy[timestep] = timestep_exported_energy
 
+        total_soc = [0.0] * self.max_timesteps
+        total_produced_energy = [0.0] * self.max_timesteps
+        for household_id in self.households:
+
+            if self.households[household_id].generator is not None:
+                for timestep in range(self.max_timesteps):
+                    total_produced_energy[timestep] += self.households[household_id].generator.value[timestep]
+            if self.households[household_id].storage is not None:
+                for timestep in range(self.max_timesteps):
+                    total_soc[timestep] += self.households[household_id].storage.value[timestep]
+
+        logs['total_imported_energy'] = total_imported_energy
+        logs['total_exported_energy'] = total_exported_energy
+        logs['total_soc'] = total_soc
+        logs['total_produced_energy'] = total_produced_energy
+
+        # Log specific households
+        logs['imported_energy'] = {}
+        logs['exported_energy'] = {}
+        logs['soc'] = {}
+        logs['produced_energy'] = {}
+
+        for household_id in self.households:
+            logs['imported_energy'][household_id] = deepcopy(self.households[household_id].aggregator.imports)
+            logs['exported_energy'][household_id] = deepcopy(self.households[household_id].aggregator.exports)
+            if self.households[household_id].generator is not None:
+                logs['produced_energy'][household_id] = deepcopy(self.households[household_id].generator.value)
+            if self.households[household_id].storage is not None:
+                logs['soc'][household_id] = deepcopy(self.households[household_id].storage.value)
+
+        self.final_logs = logs
 
 class Household:
-    def __init__(self, id: int, resources: list[BaseResource], environment: EnergyCommunityMultiHouseholdsEnv_v0, import_penalty, export_penalty, storage_action_reward,
+    def __init__(self, id: int, resources, environment: EnergyCommunityMultiHouseholdsEnv_v0, import_penalty, export_penalty, storage_action_reward,
                  storage_action_penalty, balance_penalty):
         # Define the used environment (for features like timestep tracking)
         self.environment = environment
@@ -286,11 +338,11 @@ class Household:
         self.current_production = 0
 
         # Split the incoming resources
-        temp_resources = separate_resources(self.resources)
-        self.generator = temp_resources['generators'][0] if len(temp_resources['generators']) else None
-        self.load = temp_resources['loads'][0] if len(temp_resources['loads']) else None
-        self.storage = temp_resources['storages'][0] if len(temp_resources['storages']) else None
-        self.aggregator = temp_resources['aggregator'][0]  # required
+        # temp_resources = separate_resources(self.resources)
+        self.generator = self.resources['generator'] if 'generator' in self.resources.keys() else None
+        self.load = self.resources['load'] if 'load' in self.resources.keys() else None
+        self.storage =self.resources['storage'] if 'storage' in self.resources.keys() else None
+        self.aggregator = self.resources['aggregator']  # required
 
         # Define max timestep
         self.max_timestep = self.aggregator.exports.shape[0]
@@ -354,8 +406,7 @@ class Household:
             'current_available_energy': gym.spaces.Box(low=-99999.0, high=99999.0, shape=(1,), dtype=np.float32),
             'current_buy_price': gym.spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32),
             'current_sell_price': gym.spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32),
-            'current_loads': gym.spaces.Box(low=0, high=99999.0, shape=(1,), dtype=np.float32),
-            'current_soc': gym.spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32),
+            'current_loads': gym.spaces.Box(low=0, high=99999.0, shape=(1,), dtype=np.float32)
         }
 
         if self.storage is not None:
@@ -379,7 +430,7 @@ class Household:
             temp_action_space.update(self.__create_storage_actions__())
 
         # Aggregator action space
-        temp_action_space.update( self.__create_aggregator_actions__())
+        temp_action_space.update(self._create_aggregator_actions())
 
         # Set the action space
         self.action_space = gym.spaces.Dict(temp_action_space)
@@ -411,7 +462,7 @@ class Household:
 
         # Execute generator actions
 
-    def __execute_generator_actions__(self, actions) -> tuple[float, float]:
+    def _execute_generator_actions(self, actions) -> tuple[float, float]:
         """
         Execute the actions for the generators
         :param gen: generator resource
@@ -465,7 +516,7 @@ class Household:
 
         # Execute storage actions
 
-    def __execute_storage_actions__(self, actions) -> tuple[float, float]:
+    def _execute_storage_actions(self, actions) -> tuple[float, float]:
         """
         Execute the actions for the storages
         :param storage: storage resource
@@ -564,7 +615,7 @@ class Household:
 
 
     # Create Aggregator Action Space
-    def __create_aggregator_actions__(self) -> dict:
+    def _create_aggregator_actions(self) -> dict:
         """
         Create the action space for the aggregator
         Will have the following actions:
@@ -582,7 +633,7 @@ class Household:
 
         # Execute aggregator actions
 
-    def __execute_aggregator_actions__(self, actions) -> tuple[float, float]:
+    def _execute_aggregator_actions(self, actions) -> tuple[float, float]:
         """
         Execute the actions for the aggregator
         :param actions: actions to be executed
@@ -653,7 +704,7 @@ class Household:
 
         # Get observations
 
-    def __get_next_observations__(self) -> dict:
+    def get_next_observations(self) -> gym.spaces.Dict:
         """
         Get the observations for the environment
         :return: dict
@@ -683,61 +734,13 @@ class Household:
 
         return observations
 
-        # Reset environment
-
-    def reset(self, *, seed=None, options=None):
-
-        # Define the resources
-        temp_resources = deepcopy(self.resources)
-
-        # Split the incoming resources
-        temp_resources = separate_resources(temp_resources)
-        self.generator = temp_resources['generators'][0] if len(temp_resources['generators']) else None
-        self.load = temp_resources['loads'][0] if len(temp_resources['loads']) else None
-        self.storage = temp_resources['storages'][0] if len(temp_resources['storages']) else None
-        self.aggregator = temp_resources['aggregator'][0]  # required
-
-        # Set the initial pool of available energy to load consumption at the first timestep
-        self.current_available_energy = -self.load_consumption[0]
-
-        # Reset environment variables
-        self.environment.current_timestep = 0
-        self.current_production = 0
-        self.current_consumption = 0
-        self.current_available_energy = 0
-
-        # Reset penalties and costs
-        self.accumulated_generator_cost = 0.0
-        self.accumulated_storage_cost = 0.0
-        self.accumulated_ev_cost = 0.0
-        self.accumulated_import_cost = 0.0
-        self.accumulated_export_cost = 0.0
-
-        self.accumulated_generator_penalty = 0.0
-        self.accumulated_storage_penalty = 0.0
-        self.accumulated_ev_penalty = 0.0
-        self.accumulated_ev_penalty_trip = 0.0
-        self.accumulated_import_penalty = 0.0
-        self.accumulated_export_penalty = 0.0
-
-        # Clear the history
-        self.household_balance_history = []
-        self.household_history = []
-        self.household_history_dictionary = {}
-
-        observations = self.__get_next_observations__()
-
-        return observations, {}
-
-        # Handle action execution
-
-    def execute_action(self, actions) -> tuple[float, float, float]:
+    def execute_action(self, actions) -> tuple[float, float]:
         # TODO: verify rewards and weights
         total_cost = 0
         total_penalty = 0
         if self.generator is not None:
             # Execute the actions for the generator
-            generator_cost, generator_penalty = self.__execute_generator_actions__(actions)
+            generator_cost, generator_penalty = self._execute_generator_actions(actions)
             self.accumulated_generator_cost += generator_cost
             self.accumulated_generator_penalty += generator_penalty
             total_cost += generator_cost
@@ -746,7 +749,7 @@ class Household:
 
         if self.storage is not None:
             # Execute the actions for the storage
-            storage_cost, storage_penalty = self.__execute_storage_actions__(actions)
+            storage_cost, storage_penalty = self._execute_storage_actions(actions)
             self.accumulated_storage_cost += storage_cost
             self.accumulated_storage_penalty += storage_penalty
             total_cost += storage_cost
@@ -754,7 +757,7 @@ class Household:
 
         # Execute the actions for the aggregator (currently actions don't mean anything)
         if self.current_available_energy < 0:
-            import_cost, import_penalty = self.__execute_aggregator_actions__(actions)
+            import_cost, import_penalty = self._execute_aggregator_actions(actions)
 
             self.accumulated_import_cost += import_cost
             self.accumulated_import_penalty += import_penalty
@@ -763,7 +766,7 @@ class Household:
 
         elif self.current_available_energy > 0:
             # TODO: Verify if the minus signs are correctly placed
-            export_cost, export_penalty = self.__execute_aggregator_actions__(actions)
+            export_cost, export_penalty = self._execute_aggregator_actions(actions)
             self.accumulated_export_cost -= export_cost
             self.accumulated_export_penalty += export_penalty
 
@@ -774,16 +777,15 @@ class Household:
         # Is it that bad if we stay with available energy
         total_penalty += self.balance_penalty * abs(self.current_available_energy)
         self.household_balance_history.append(self.current_available_energy)
-        return total_cost, total_penalty, 0.0
+        return total_cost, total_penalty
 
-    def calculate_reward(self, cost: float, penalty: float, additional_penalty: float) -> float:
+    def calculate_reward(self, cost: float, penalty: float) -> float:
         # Calculate the reward
         reward = - cost - penalty
 
         return reward
 
-        # Build the info logs
-
+    # Build the info logs
     def log_info(self):
 
         info = {}
@@ -809,3 +811,5 @@ class Household:
         })
 
         return info
+
+
