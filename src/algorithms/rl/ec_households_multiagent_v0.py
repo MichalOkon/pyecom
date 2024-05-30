@@ -1,13 +1,24 @@
 import string
+import time
 from typing import Union
+import os
 
 import gymnasium as gym
 import numpy as np
 from copy import deepcopy
+
+import pandas as pd
+
 from src.resources.base_resource import BaseResource
 from src.algorithms.rl.utils import separate_resources
 
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
+import logging
+
+# Configure logging
+formatted_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
+logging.basicConfig(filename='training_info_logs_{}.log'.format(formatted_time), level=logging.INFO, filemode='w',
+                    format='%(asctime)s - %(message)s')
 
 
 class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
@@ -82,10 +93,15 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         # Balance history
         self.balance_history = []
         self.reward_history = []
-        self.final_logs = {}
 
         # Current real reward
         self.current_real_reward = {}
+
+        # Logging
+        # self.total_imported_energy = [0.0] * self.max_timesteps
+        # self.total_exported_energy = [0.0] * self.max_timesteps
+        # self.total_soc = [0.0] * self.max_timesteps
+        # self.total_produced_energy = [0.0] * self.max_timesteps
 
     def _create_households(self, households_resources: list[list[BaseResource]], import_penalty,
                            export_penalty,
@@ -155,7 +171,6 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         # Clear the history
         self.balance_history = []
         self.reward_history = []
-        self.final_logs = {}
 
         observations = self._get_households_observations()
 
@@ -178,8 +193,9 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         # Check for completion of the episode
         if self.current_timestep >= self.max_timesteps:
             terminateds, truncateds = self._log_ending(True)
-            observations, reward, info = {}, {}, {}
-
+            observations, reward = {}, {}
+            info = {'__common__': self.log_and_save_final_values()}
+            logging.info("Aggregated Episode Info: %s", info['__common__'])
             return observations, reward, terminateds, truncateds, info
 
         # Check for existing actions
@@ -212,6 +228,7 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
                                                                                                   penalty)
                 summed_available_energy += self.households[action_id].current_available_energy
                 info[action_id] = self.households[action_id].log_info()
+                logging.info("Household %s Episode Info: %s", action_id, info[action_id])
 
             self.balance_history.append(summed_available_energy)
             self.reward_history.append(self.current_real_reward)
@@ -267,17 +284,25 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         truncateds['__all__'] = is_over_flag
 
         if is_over_flag:
-            self.log_final_values()
+            self.log_and_save_final_values()
 
         return terminateds, truncateds
 
-    # Log final values
-    def log_final_values(self):
-        logs = {}
+    def _save_dict_to_csv(self, logs, name):
+        logs_df = pd.DataFrame(logs)
+        logs_df.to_csv(name, index=False)
 
-        # Aggregate values from different households
-        total_imported_energy = [0.0] * self.max_timesteps
-        total_exported_energy = [0.0] * self.max_timesteps
+    def get_current_time(self):
+        return time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
+
+    def create_results_directory(self, current_time):
+        dir_name = "results/run_results_{}".format(current_time)
+        os.makedirs(dir_name, exist_ok=True)
+        return dir_name
+
+    def calculate_aggregated_values(self):
+        total_imported_energy, total_exported_energy, total_soc, total_produced_energy = [0.0] * self.max_timesteps, [
+            0.0] * self.max_timesteps, [0.0] * self.max_timesteps, [0.0] * self.max_timesteps
         for timestep in range(self.max_timesteps):
             timestep_imported_energy = 0.0
             timestep_exported_energy = 0.0
@@ -285,39 +310,64 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
                 timestep_imported_energy += self.households[household_id].aggregator.imports[timestep]
                 timestep_exported_energy += self.households[household_id].aggregator.exports[timestep]
             total_exported_energy[timestep] = timestep_exported_energy
-            total_imported_energy[timestep] = timestep_exported_energy
+            total_imported_energy[timestep] = timestep_imported_energy
 
-        total_soc = [0.0] * self.max_timesteps
-        total_produced_energy = [0.0] * self.max_timesteps
         for household_id in self.households:
-
             if self.households[household_id].generator is not None:
                 for timestep in range(self.max_timesteps):
                     total_produced_energy[timestep] += self.households[household_id].generator.value[timestep]
             if self.households[household_id].storage is not None:
                 for timestep in range(self.max_timesteps):
                     total_soc[timestep] += self.households[household_id].storage.value[timestep]
+                    return total_imported_energy, total_exported_energy, total_soc, total_produced_energy
 
-        logs['total_imported_energy'] = total_imported_energy
-        logs['total_exported_energy'] = total_exported_energy
-        logs['total_soc'] = total_soc
-        logs['total_produced_energy'] = total_produced_energy
-
-        # Log specific households
-        logs['imported_energy'] = {}
-        logs['exported_energy'] = {}
-        logs['soc'] = {}
-        logs['produced_energy'] = {}
-
+    def calculate_household_values(self):
+        household_logs = {'imported_energy': {}, 'exported_energy': {}, 'soc': {}, 'produced_energy': {}}
+        accumulated_household_logs = {'accumulated_import_cost': {}, 'accumulated_export_cost': {},
+                                      'accumulated_import_penalty': {}, 'accumulated_export_penalty': {},
+                                      'accumulated_generator_cost': {}, 'accumulated_generator_penalty': {},
+                                      'accumulated_storage_cost': {}, 'accumulated_storage_penalty': {}}
         for household_id in self.households:
-            logs['imported_energy'][household_id] = deepcopy(self.households[household_id].aggregator.imports)
-            logs['exported_energy'][household_id] = deepcopy(self.households[household_id].aggregator.exports)
-            if self.households[household_id].generator is not None:
-                logs['produced_energy'][household_id] = deepcopy(self.households[household_id].generator.value)
-            if self.households[household_id].storage is not None:
-                logs['soc'][household_id] = deepcopy(self.households[household_id].storage.value)
+            household_logs['imported_energy'][household_id] = deepcopy(self.households[household_id].aggregator.imports)
+            household_logs['exported_energy'][household_id] = deepcopy(self.households[household_id].aggregator.exports)
+            accumulated_household_logs['accumulated_import_cost'][household_id] = self.households[
+                household_id].accumulated_import_cost
+            accumulated_household_logs['accumulated_export_cost'][household_id] = self.households[
+                household_id].accumulated_export_cost
+            accumulated_household_logs['accumulated_import_penalty'][household_id] = self.households[
+                household_id].accumulated_import_penalty
+            accumulated_household_logs['accumulated_export_penalty'][household_id] = self.households[
+                household_id].accumulated_export_penalty
 
-        self.final_logs = logs
+            if self.households[household_id].generator is not None:
+                household_logs['produced_energy'][household_id] = deepcopy(
+                    self.households[household_id].generator.value)
+                accumulated_household_logs['accumulated_generator_cost'][household_id] = self.households[
+                    household_id].accumulated_generator_cost
+                accumulated_household_logs['accumulated_generator_penalty'][household_id] = self.households[
+                    household_id].accumulated_generator_penalty
+            if self.households[household_id].storage is not None:
+                household_logs['soc'][household_id] = deepcopy(self.households[household_id].storage.value)
+                accumulated_household_logs['accumulated_storage_cost'][household_id] = self.households[
+                    household_id].accumulated_storage_cost
+                accumulated_household_logs['accumulated_storage_penalty'][household_id] = self.households[
+                    household_id].accumulated_storage_penalty
+        return household_logs, accumulated_household_logs
+
+    def save_logs(self, logs, name):
+        self._save_dict_to_csv(logs, name)
+
+    def log_and_save_final_values(self):
+        current_time = self.get_current_time()
+        dir_name = self.create_results_directory(current_time)
+        total_imported_energy, total_exported_energy, total_soc, total_produced_energy = self.calculate_aggregated_values()
+        household_logs, accumulated_household_logs = self.calculate_household_values()
+        logs = {'total_imported_energy': total_imported_energy, 'total_exported_energy': total_exported_energy,
+                'total_soc': total_soc, 'total_produced_energy': total_produced_energy}
+        self.save_logs(logs, dir_name + '/aggregated_results.csv')
+        self.save_logs(accumulated_household_logs, dir_name + '/accumulated_household_logs.csv')
+        self.save_logs(household_logs, dir_name + '/household_logs.csv')
+        return logs
 
 
 class Household:
@@ -364,9 +414,12 @@ class Household:
         self._handle_action_space()
 
         # Costs for each resource
+        self.generator_cost: float = 0.0
+        self.storage_cost: float = 0.0
+        self.import_cost: float = 0.0
+        self.export_cost: float = 0.0
         self.accumulated_generator_cost: float = 0.0
         self.accumulated_storage_cost: float = 0.0
-        self.accumulated_ev_cost: float = 0.0
         self.accumulated_import_cost: float = 0.0
         self.accumulated_export_cost: float = 0.0
 
@@ -380,10 +433,12 @@ class Household:
         self.balance_penalty = balance_penalty
 
         # Set a penalty for each resource
+        self.generator_penalty: float = 0.0
+        self.storage_penalty: float = 0.0
+        self.import_penalty: float = 0.0
+        self.export_penalty: float = 0.0
         self.accumulated_generator_penalty: float = 0.0
         self.accumulated_storage_penalty: float = 0.0
-        self.accumulated_ev_penalty: float = 0.0
-        self.accumulated_ev_penalty_trip: float = 0.0
         self.accumulated_import_penalty: float = 0.0
         self.accumulated_export_penalty: float = 0.0
 
@@ -409,6 +464,7 @@ class Household:
         }
 
         if self.storage is not None:
+            # TODO: Remove the maxes
             temp_observation_space.update({'current_soc': gym.spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32),
                                            'charge_max': gym.spaces.Box(low=0, high=99999.0, shape=(1,),
                                                                         dtype=np.float32),
@@ -497,7 +553,7 @@ class Household:
         # Update on the resource
         self.generator.value[self.environment.current_timestep] = produced_energy
 
-        # TODO: penalize for using non-sustainable gnerators
+        # TODO: penalize for using non-sustainable generators
         # cost: float = self.generator.upper_bound[self.environment.current_timestep] - produced_energy
 
         return cost, penalty
@@ -651,6 +707,7 @@ class Household:
         # If we still have energy left, there is no need to import extra energy
         if self.current_available_energy > 0:
 
+            # TODO: Should overproduction be penalized?
             # Force to export
             # 1 - Get the deviation from the bounds
             to_export = self.current_available_energy
@@ -660,9 +717,6 @@ class Household:
                 penalty = deviation
 
             # 2 - Set the exports for agent and resource
-            self.aggregator.imports[self.environment.current_timestep] = 0.0
-            self.aggregator.exports[self.environment.current_timestep] = to_export
-
             self.aggregator.imports[self.environment.current_timestep] = 0.0
             self.aggregator.exports[self.environment.current_timestep] = to_export
 
@@ -686,9 +740,6 @@ class Household:
                 penalty = deviation
 
             # Set the imports for agent and resource
-            self.aggregator.imports[self.environment.current_timestep] = to_import
-            self.aggregator.exports[self.environment.current_timestep] = 0.0
-
             self.aggregator.imports[self.environment.current_timestep] = to_import
             self.aggregator.exports[self.environment.current_timestep] = 0.0
 
@@ -774,7 +825,7 @@ class Household:
         elif self.current_available_energy > 0:
             # TODO: Verify if the minus signs are correctly placed
             export_cost, export_penalty = self._execute_aggregator_actions(actions)
-            self.accumulated_export_cost -= export_cost
+            self.accumulated_export_cost += export_cost
             self.accumulated_export_penalty += export_penalty
 
             # Added self.export_penalty myself
@@ -800,21 +851,27 @@ class Household:
         # Generator
         if self.generator is not None:
             info.update({
-                'generator_cost': self.accumulated_generator_cost,
-                'generator_penalty': self.accumulated_generator_penalty
+                'accumulated_generator_cost': self.accumulated_generator_cost,
+                'accumulated_generator_penalty': self.accumulated_generator_penalty,
+                'generator_cost': self.generator_cost,
+                'generator_penalty': self.generator_penalty,
             })
 
         # Storages
         if self.storage is not None:
             info.update({
-                'storage_cost': self.accumulated_storage_cost,
-                'storage_penalty': self.accumulated_storage_penalty
+                'accumulated_storage_cost': self.accumulated_storage_cost,
+                'accumulated_storage_penalty': self.accumulated_storage_penalty,
+                'storage_cost': self.storage_cost,
+                'storage_penalty': self.storage_penalty
             })
 
         # Aggregator
         info.update({
-            'aggregator_cost': self.accumulated_import_cost + self.accumulated_export_cost,
-            'aggregator_penalty': self.accumulated_import_penalty + self.accumulated_export_penalty
+            'accumulated_aggregator_cost': self.accumulated_import_cost + self.accumulated_export_cost,
+            'accumulated_aggregator_penalty': self.accumulated_import_penalty + self.accumulated_export_penalty,
+            'aggregator_cost': self.import_cost + self.export_cost,
+            'aggregator_penalty': self.import_penalty + self.export_penalty
         })
 
         return info
