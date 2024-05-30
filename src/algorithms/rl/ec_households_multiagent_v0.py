@@ -1,6 +1,4 @@
-import string
 import time
-from typing import Union
 import os
 
 import gymnasium as gym
@@ -10,7 +8,6 @@ from copy import deepcopy
 import pandas as pd
 
 from src.resources.base_resource import BaseResource
-from src.algorithms.rl.utils import separate_resources
 
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 import logging
@@ -53,11 +50,6 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
 
         # Initialize observation space for each household
         self._create_observation_space()
-
-        # # Calculate total laods
-        # self.total_loads =
-        # # Calculate the sum of loads for each timestep
-        # self.load_consumption = np.sum([load.value for load in self.loads], axis=0)
 
         # Initialize time counter
         self.current_timestep: int = 0
@@ -182,82 +174,50 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         Step function for environment transitions
         Agents will act in the following order:
         1. Generators
-        2. EVs
-        3. Storages
-        4. Aggregator
+        2. Storages
+        3. Aggregator
 
         :param action_dict: dict
         :return: tuple
         """
-
-        # Check for completion of the episode
-        if self.current_timestep >= self.max_timesteps:
-            terminateds, truncateds = self._log_ending(True)
-            observations, reward = {}, {}
-            info = {'__common__': self.log_and_save_final_values()}
-            logging.info("Aggregated Episode Info: %s", info['__common__'])
-            return observations, reward, terminateds, truncateds, info
-
         # Check for existing actions
         exists_actions = len(action_dict) > 0
 
-        # Observations
         observations = {}
-
-        # Reward
         reward: dict = {}
-
-        # Info dictionary
         info: dict = {}
+        # Check for completion of the episode
+        if self.current_timestep >= self.max_timesteps:
+            observations, reward = {}, {}
 
-        summed_available_energy = 0
-        # Execute the actions
-        if exists_actions:
+            termination_flags, truncation_flags = self._set_termination_flags(True)
+            self._log_and_store_episode_end_values()
 
-            # Do the actions
-            for action_id in action_dict.keys():
-                # Execute the actions
-                cost, penalty = self.households[action_id]. \
-                    execute_action(action_dict[action_id])
+            logging.info("Aggregated Episode Info: %s", info['__common__'])
+        # Check if there are actions to be executed
+        elif exists_actions:
+            # Execute the actions
+            for household_id in action_dict:
+                reward[household_id], info[household_id] = self.households[household_id].step(action_dict[household_id])
 
-                # Log the agent
-                # self._log_households(deepcopy(self.households[action_id]))
-
-                # Calculate the true reward
-                self.current_real_reward[action_id] = self.households[action_id].calculate_reward(cost,
-                                                                                                  penalty)
-                summed_available_energy += self.households[action_id].current_available_energy
-                info[action_id] = self.households[action_id].log_info()
-                logging.info("Household %s Episode Info: %s", action_id, info[action_id])
-
-            self.balance_history.append(summed_available_energy)
-            self.reward_history.append(self.current_real_reward)
             # Terminations and truncations
-            terminateds, truncateds = self._log_ending(False)
-            #
-            # # Check for end of episode
-            # if self.current_timestep >= self.max_timesteps:
-            #     terminateds, truncateds = self._log_ending(True)
+            termination_flags, truncation_flags = self._set_termination_flags(False)
 
-            next_obs = self._get_households_observations()
-
-            # Update the timestep
-            self.current_timestep += 1
-
-            return next_obs, self.current_real_reward, terminateds, truncateds, info
-
-        # Terminations and truncations
-        terminateds = {a: False for a in self.households}
-        terminateds['__all__'] = False
-        truncateds = {a: False for a in self.households}
-        truncateds['__all__'] = False
+            observations = self._get_households_observations()
+            reward = self.current_real_reward
+        else:
+            # Terminations and truncations
+            termination_flags, truncation_flags = self._set_termination_flags(False)
 
         # Update the timestep
+        self.iterate_timestep()
+
+        return observations, reward, termination_flags, truncation_flags, info
+
+    def iterate_timestep(self):
         self.current_timestep += 1
-
-        return observations, reward, terminateds, truncateds, info
-
-        # Get observations
+        for household_id in self.households.keys():
+            self.households[household_id].current_timestep = self.current_timestep
 
     def _get_households_observations(self) -> dict:
         """
@@ -277,14 +237,15 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         return observations
 
     # Log ending of episode
-    def _log_ending(self, is_over_flag: bool) -> tuple[dict, dict]:
+    def _set_termination_flags(self, is_over_flag: bool) -> tuple[dict, dict]:
         terminateds = {a: is_over_flag for a in self.households}
         terminateds['__all__'] = is_over_flag
         truncateds = {a: is_over_flag for a in self.households}
         truncateds['__all__'] = is_over_flag
 
         if is_over_flag:
-            self.log_and_save_final_values()
+            self._log_and_store_episode_end_values()
+
 
         return terminateds, truncateds
 
@@ -357,7 +318,7 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
     def save_logs(self, logs, name):
         self._save_dict_to_csv(logs, name)
 
-    def log_and_save_final_values(self):
+    def _log_and_store_episode_end_values(self):
         current_time = self.get_current_time()
         dir_name = self.create_results_directory(current_time)
         total_imported_energy, total_exported_energy, total_soc, total_produced_energy = self.calculate_aggregated_values()
@@ -374,8 +335,8 @@ class Household:
     def __init__(self, id: int, resources, environment: EnergyCommunityMultiHouseholdsEnv_v0, import_penalty,
                  export_penalty, storage_action_reward,
                  storage_action_penalty, balance_penalty):
-        # Define the used environment (for features like timestep tracking)
-        self.environment = environment
+        # Track the current timestep
+        self.current_timestep = 0
 
         # Define the resources
         self.resources = deepcopy(resources)
@@ -395,10 +356,6 @@ class Household:
 
         # Define max timestep
         self.max_timestep = self.aggregator.exports.shape[0]
-
-        # TODO: This should go into environment?
-        # # Calculate the sum of loads for each timestep
-        # self.load_consumption = np.sum(self.load.value, axis=0)
 
         # Initialize variables for production and consumption
         self.current_production: float = 0
@@ -444,10 +401,6 @@ class Household:
 
         # Balance history
         self.household_balance_history = []
-
-        # History of the environment
-        self.household_history = []
-        self.household_history_dictionary = {}
 
         # Current real reward
         self.current_real_reward = {}
@@ -521,277 +474,20 @@ class Household:
 
         return generator_actions
 
-        # Execute generator actions
+    # Perform one step in the environment
+    def step(self, action: dict) -> tuple:
+        # Execute the actions
+        cost, penalty = self.execute_action(action)
 
-    def _execute_generator_actions(self, actions) -> tuple[float, float]:
-        """
-        Execute the actions for the generators
-        :param gen: generator resource
-        :param actions: actions to be executed
-        :return: float
-        """
+        # Calculate the rewards based on the costs and penalties
+        real_reward = self.calculate_reward(cost, penalty)
 
-        # Calculate the cost of the generator
-        penalty: float = 0.0
-        cost: float = 0.0
-        # Placeholder for produced energy
-        produced_energy: float = 0.0
+        # Log the agent
+        info = self.log_info()
 
-        # Check if actions has active or production
-        if 'active' in actions.keys():
-            produced_energy = (actions['active'] *
-                               self.generator.upper_bound[self.environment.current_timestep])
-        elif 'production' in actions.keys():
-            produced_energy = (actions['production'][0] *
-                               self.generator.upper_bound[self.environment.current_timestep])
+        return real_reward, info
 
-        # Attribute the produced energy to the generator
-        self.generator.value[self.environment.current_timestep] = produced_energy
-        self.current_production += produced_energy
-        self.current_available_energy += produced_energy
-
-        # Update on the resource
-        self.generator.value[self.environment.current_timestep] = produced_energy
-
-        # TODO: penalize for using non-sustainable generators
-        # cost: float = self.generator.upper_bound[self.environment.current_timestep] - produced_energy
-
-        return cost, penalty
-
-    # Create Storage Action Space
-    def _create_storage_actions(self) -> dict:
-        """
-        Create the action space for the storages
-        Will have the following actions:
-        - ctl: control the storage (bool) -> 0/1/2 for none/charge/discharge
-        - value: value to be charged or discharged (float)
-        :return: dict
-        """
-
-        storage_actions = {
-            'ctl': gym.spaces.Discrete(3),
-            'value': gym.spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32)
-        }
-
-        return storage_actions
-
-        # Execute storage actions
-
-    def _execute_storage_actions(self, actions) -> tuple[float, float]:
-        """
-        Execute the actions for the storages
-        :param storage: storage resource
-        :param actions: actions to be executed
-        :return: reward to be used as penalty
-        """
-        # TODO: verify if this function is correct
-
-        # Calculate the cost of the storage
-        cost: float = 0.0
-
-        # Set up the penalty to be returned in case of illegal storage actions
-        # Such as overcharging or discharging beyond the available energy.
-        # The reward will be the deviation from the bounds, to be later used as a penalty
-        penalty: float = 0.0
-
-        # Check if it is the first timestep
-        if self.environment.current_timestep == 0:
-            self.storage.value[self.environment.current_timestep] = self.storage.initial_charge
-        else:
-            self.storage.value[self.environment.current_timestep] = self.storage.value[
-                self.environment.current_timestep - 1]
-
-        # Idle state
-        if actions['ctl'] == 0:
-            self.storage.charge[self.environment.current_timestep] = 0.0
-            self.storage.discharge[self.environment.current_timestep] = 0.0
-
-            return cost, penalty
-
-        # Charge state
-        elif actions['ctl'] == 1:
-            # Percent of the charge_max you're willing to use at a given moment?
-            charge = actions['value'][0]
-
-            # Set the charge as a percentage of the maximum charge allowed
-            charge = charge * self.storage.charge_max / self.storage.capacity_max
-
-            if self.storage.value[self.environment.current_timestep] + charge > 1.0:
-                # Calculate the deviation from the bounds
-                deviation = self.storage.value[self.environment.current_timestep] + charge - 1.0
-                charge = 1.0 - self.storage.value[self.environment.current_timestep]
-                penalty = deviation
-
-            # Get the cost of the energy
-            # cost = charge * storage.cost_charge[self.environment.current_timestep]
-
-            # Heavily penalize the storage action if it requires importing energy
-            if self.current_available_energy - charge * self.storage.charge_max < 0:
-                penalty += self.storage_action_penalty
-            # elif self.current_available_energy - charge * self.storage.charge_max > 0:
-            #     penalty -= self.storage_action_reward
-
-            # Remove energy from the pool
-            self.current_available_energy -= charge * self.storage.capacity_max
-
-            #  Update soc, charge and discharge values
-            self.storage.value[self.environment.current_timestep] += charge
-            self.storage.charge[self.environment.current_timestep] = charge
-            self.storage.discharge[self.environment.current_timestep] = 0.0
-
-            return cost, penalty
-
-        # Discharge state
-        elif actions['ctl'] == 2:
-            discharge = actions['value'][0]
-
-            # Set discharge as a percentage of the maximum discharge allowed
-            discharge = discharge * self.storage.discharge_max / self.storage.capacity_max
-
-            if self.storage.value[self.environment.current_timestep] - discharge < 0.0:
-                # Calculate the deviation from the bounds
-                deviation = abs(self.storage.value[self.environment.current_timestep] - discharge)
-                discharge = self.storage.value[self.environment.current_timestep]
-                penalty = deviation
-
-            # Get the cost of the energy
-            # cost = discharge * storage.cost_discharge[self.environment.current_timestep]
-            # cost = self.storage.discharge_max - discharge * self.storage.capacity_max
-
-            #  Update soc, charge and discharge values
-            self.storage.value[self.environment.current_timestep] -= discharge
-            self.storage.charge[self.environment.current_timestep] = 0.0
-            self.storage.discharge[self.environment.current_timestep] = discharge
-
-            # Add the energy to the pool
-            self.current_available_energy += discharge * self.storage.capacity_max
-
-            return cost, penalty
-
-        return cost, penalty
-
-    # Create Aggregator Action Space
-    def _create_aggregator_actions(self) -> dict:
-        """
-        Create the action space for the aggregator
-        Will have the following actions:
-        - ctl: action to take 0/1/2 for none/import/export
-        - value: value to be imported or exported (float)
-
-        :return: dict
-        """
-
-        return {
-            'ctl': gym.spaces.Discrete(3),
-            'value': gym.spaces.Box(low=0, high=max(self.aggregator.import_max),
-                                    shape=(1,), dtype=np.float32)
-        }
-
-        # Execute aggregator actions
-
-    def _execute_aggregator_actions(self, actions) -> tuple[float, float]:
-        """
-        Execute the actions for the aggregator
-        :param actions: actions to be executed
-        :return: aggregator costs and penalty
-        """
-
-        # Set up the aggregator's costs
-        cost: float = 0.0
-
-        # Set up the reward to be returned in case of illegal aggregator actions
-        # Such as importing or exporting beyond the allowed limits.
-        # The reward will be the deviation from the bounds, to be later used as a penalty
-        penalty: float = 0.0
-
-        # If we still have energy left, there is no need to import extra energy
-        if self.current_available_energy > 0:
-
-            # TODO: Should overproduction be penalized?
-            # Force to export
-            # 1 - Get the deviation from the bounds
-            to_export = self.current_available_energy
-            if to_export > self.aggregator.export_max[self.environment.current_timestep]:
-                deviation = to_export - self.aggregator.export_max[self.environment.current_timestep]
-                to_export = self.aggregator.export_max[self.environment.current_timestep]
-                penalty = deviation
-
-            # 2 - Set the exports for agent and resource
-            self.aggregator.imports[self.environment.current_timestep] = 0.0
-            self.aggregator.exports[self.environment.current_timestep] = to_export
-
-            # 3 - Update the available energy pool
-            self.current_available_energy -= to_export
-
-            # Update the cost of the export
-            cost = to_export * self.aggregator.export_cost[self.environment.current_timestep]
-
-            return -cost, penalty
-
-        # Check if there is a defect of energy that needs to be imported
-        if self.current_available_energy < 0:
-
-            # If not, we are forced to import
-            to_import = abs(self.current_available_energy)
-            if to_import > self.aggregator.import_max[self.environment.current_timestep]:
-                # Calculate the deviation from the bounds
-                deviation = to_import - self.aggregator.import_max[self.environment.current_timestep]
-                to_import = self.aggregator.import_max[self.environment.current_timestep]
-                penalty = deviation
-
-            # Set the imports for agent and resource
-            self.aggregator.imports[self.environment.current_timestep] = to_import
-            self.aggregator.exports[self.environment.current_timestep] = 0.0
-
-            # Update the available energy pool
-            self.current_available_energy += to_import
-
-            # Get the associated costs of importation
-            cost = to_import * self.aggregator.import_cost[self.environment.current_timestep]
-
-            return cost, penalty
-
-        return cost, penalty
-
-        # Get observations
-
-    def get_next_observations(self) -> dict:
-        """
-        Get the observations for the environment
-        :return: dict
-        """
-
-        # Get the observation for the next resource
-        observations = {}
-
-        if self.environment.current_timestep >= self.load.value.shape[0]:
-            return observations
-
-        observations: dict = {
-            'current_available_energy': np.array([self.current_available_energy],
-                                                 dtype=np.float32),
-            'current_buy_price': np.array([self.aggregator.import_cost[self.environment.current_timestep]],
-                                          dtype=np.float32),
-            'current_sell_price': np.array([self.aggregator.export_cost[self.environment.current_timestep]],
-                                           dtype=np.float32),
-            'current_loads': np.array([self.load.value[self.environment.current_timestep]],
-                                      dtype=np.float32)
-        }
-        if self.storage is not None:
-            observations.update({'current_soc': np.array(
-                [self.storage.value[self.environment.current_timestep - 1] if self.environment.current_timestep > 0
-                 else self.storage.initial_charge],
-                dtype=np.float32),
-                'charge_max': np.array([self.storage.charge_max],
-                                       dtype=np.float32),
-                'discharge_max': np.array([self.storage.discharge_max],
-                                          dtype=np.float32),
-                'capacity_max': np.array([self.storage.capacity_max],
-                                         dtype=np.float32),
-            })
-
-        return observations
-
+    # Execute the actions for the household
     def execute_action(self, actions) -> tuple[float, float]:
         # TODO: verify rewards and weights
         total_cost = 0
@@ -836,6 +532,268 @@ class Household:
         total_penalty += self.balance_penalty * abs(self.current_available_energy)
         self.household_balance_history.append(self.current_available_energy)
         return total_cost, total_penalty
+
+    # Execute generator actions
+    def _execute_generator_actions(self, actions) -> tuple[float, float]:
+        """
+        Execute the actions for the generators
+        :param gen: generator resource
+        :param actions: actions to be executed
+        :return: float
+        """
+
+        # Calculate the cost of the generator
+        penalty: float = 0.0
+        cost: float = 0.0
+        # Placeholder for produced energy
+        produced_energy: float = 0.0
+
+        # Check if actions has active or production
+        if 'active' in actions.keys():
+            produced_energy = (actions['active'] *
+                               self.generator.upper_bound[self.current_timestep])
+        elif 'production' in actions.keys():
+            produced_energy = (actions['production'][0] *
+                               self.generator.upper_bound[self.current_timestep])
+
+        # Attribute the produced energy to the generator
+        self.generator.value[self.current_timestep] = produced_energy
+        self.current_production += produced_energy
+        self.current_available_energy += produced_energy
+
+        # Update on the resource
+        self.generator.value[self.current_timestep] = produced_energy
+
+        # TODO: penalize for using non-sustainable generators
+        # cost: float = self.generator.upper_bound[self.current_timestep] - produced_energy
+
+        return cost, penalty
+
+    # Create Storage Action Space
+    def _create_storage_actions(self) -> dict:
+        """
+        Create the action space for the storages
+        Will have the following actions:
+        - ctl: control the storage (bool) -> 0/1/2 for none/charge/discharge
+        - value: value to be charged or discharged (float)
+        :return: dict
+        """
+
+        storage_actions = {
+            'ctl': gym.spaces.Discrete(3),
+            'value': gym.spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32)
+        }
+
+        return storage_actions
+
+        # Execute storage actions
+
+    # Execute storage actions
+    def _execute_storage_actions(self, actions) -> tuple[float, float]:
+        """
+        Execute the actions for the storages
+        :param storage: storage resource
+        :param actions: actions to be executed
+        :return: reward to be used as penalty
+        """
+        # TODO: verify if this function is correct
+
+        # Calculate the cost of the storage
+        cost: float = 0.0
+
+        # Set up the penalty to be returned in case of illegal storage actions
+        # Such as overcharging or discharging beyond the available energy.
+        # The reward will be the deviation from the bounds, to be later used as a penalty
+        penalty: float = 0.0
+
+        # Check if it is the first timestep
+        if self.current_timestep == 0:
+            self.storage.value[self.current_timestep] = self.storage.initial_charge
+        else:
+            self.storage.value[self.current_timestep] = self.storage.value[self.current_timestep - 1]
+
+        # Idle state
+        if actions['ctl'] == 0:
+            self.storage.charge[self.current_timestep] = 0.0
+            self.storage.discharge[self.current_timestep] = 0.0
+
+        # Charge state
+        elif actions['ctl'] == 1:
+            # Percent of the charge_max you're willing to use at a given moment?
+            charge = actions['value'][0]
+
+            # Set the charge as a percentage of the maximum charge allowed
+            charge = charge * self.storage.charge_max / self.storage.capacity_max
+
+            if self.storage.value[self.current_timestep] + charge > 1.0:
+                # Calculate the deviation from the bounds
+                deviation = self.storage.value[self.current_timestep] + charge - 1.0
+                charge = 1.0 - self.storage.value[self.current_timestep]
+                penalty = deviation
+
+            # Get the cost of the energy
+            # cost = charge * storage.cost_charge[self.current_timestep]
+
+            # Heavily penalize the storage action if it requires importing energy
+            if self.current_available_energy - charge * self.storage.charge_max < 0:
+                penalty += self.storage_action_penalty
+            # elif self.current_available_energy - charge * self.storage.charge_max > 0:
+            #     penalty -= self.storage_action_reward
+
+            # Remove energy from the pool
+            self.current_available_energy -= charge * self.storage.capacity_max
+
+            #  Update soc, charge and discharge values
+            self.storage.value[self.current_timestep] += charge
+            self.storage.charge[self.current_timestep] = charge
+            self.storage.discharge[self.current_timestep] = 0.0
+
+        # Discharge state
+        else:
+            discharge = actions['value'][0]
+
+            # Set discharge as a percentage of the maximum discharge allowed
+            discharge = discharge * self.storage.discharge_max / self.storage.capacity_max
+
+            if self.storage.value[self.current_timestep] - discharge < 0.0:
+                # Calculate the deviation from the bounds
+                deviation = abs(self.storage.value[self.current_timestep] - discharge)
+                discharge = self.storage.value[self.current_timestep]
+                penalty = deviation
+
+            # Get the cost of the energy
+            # cost = discharge * storage.cost_discharge[self.current_timestep]
+            # cost = self.storage.discharge_max - discharge * self.storage.capacity_max
+
+            #  Update soc, charge and discharge values
+            self.storage.value[self.current_timestep] -= discharge
+            self.storage.charge[self.current_timestep] = 0.0
+            self.storage.discharge[self.current_timestep] = discharge
+
+            # Add the energy to the pool
+            self.current_available_energy += discharge * self.storage.capacity_max
+
+        return cost, penalty
+
+    # Create Aggregator Action Space
+    def _create_aggregator_actions(self) -> dict:
+        """
+        Create the action space for the aggregator
+        Will have the following actions:
+        - ctl: action to take 0/1/2 for none/import/export
+        - value: value to be imported or exported (float)
+
+        :return: dict
+        """
+
+        return {
+            'ctl': gym.spaces.Discrete(3),
+            'value': gym.spaces.Box(low=0, high=max(self.aggregator.import_max),
+                                    shape=(1,), dtype=np.float32)
+        }
+
+    # Execute aggregator actions
+    def _execute_aggregator_actions(self, actions) -> tuple[float, float]:
+        """
+        Execute the actions for the aggregator
+        :param actions: actions to be executed
+        :return: aggregator costs and penalty
+        """
+
+        # Set up the aggregator's costs
+        cost: float = 0.0
+
+        # Set up the reward to be returned in case of illegal aggregator actions
+        # Such as importing or exporting beyond the allowed limits.
+        # The reward will be the deviation from the bounds, to be later used as a penalty
+        penalty: float = 0.0
+
+        # If we still have energy left, there is no need to import extra energy
+        if self.current_available_energy > 0:
+
+            # TODO: Should overproduction be penalized?
+            # Force to export
+            # 1 - Get the deviation from the bounds
+            to_export = self.current_available_energy
+            if to_export > self.aggregator.export_max[self.current_timestep]:
+                deviation = to_export - self.aggregator.export_max[self.current_timestep]
+                to_export = self.aggregator.export_max[self.current_timestep]
+                penalty = deviation
+
+            # 2 - Set the exports for agent and resource
+            self.aggregator.imports[self.current_timestep] = 0.0
+            self.aggregator.exports[self.current_timestep] = to_export
+
+            # 3 - Update the available energy pool
+            self.current_available_energy -= to_export
+
+            # Update the cost of the export
+            cost = to_export * self.aggregator.export_cost[self.current_timestep]
+
+            return -cost, penalty
+
+        # Check if there is a defect of energy that needs to be imported
+        if self.current_available_energy < 0:
+
+            # If not, we are forced to import
+            to_import = abs(self.current_available_energy)
+            if to_import > self.aggregator.import_max[self.current_timestep]:
+                # Calculate the deviation from the bounds
+                deviation = to_import - self.aggregator.import_max[self.current_timestep]
+                to_import = self.aggregator.import_max[self.current_timestep]
+                penalty = deviation
+
+            # Set the imports for agent and resource
+            self.aggregator.imports[self.current_timestep] = to_import
+            self.aggregator.exports[self.current_timestep] = 0.0
+
+            # Update the available energy pool
+            self.current_available_energy += to_import
+
+            # Get the associated costs of importation
+            cost = to_import * self.aggregator.import_cost[self.current_timestep]
+
+            return cost, penalty
+
+        return cost, penalty
+
+    # Get observations
+    def get_next_observations(self) -> dict:
+        """
+        Get the observations for the environment
+        :return: dict
+        """
+
+        # Get the observation for the next resource
+        observations = {}
+
+        if self.current_timestep >= self.load.value.shape[0]:
+            return observations
+
+        observations: dict = {
+            'current_available_energy': np.array([self.current_available_energy],
+                                                 dtype=np.float32),
+            'current_buy_price': np.array([self.aggregator.import_cost[self.current_timestep]],
+                                          dtype=np.float32),
+            'current_sell_price': np.array([self.aggregator.export_cost[self.current_timestep]],
+                                           dtype=np.float32),
+            'current_loads': np.array([self.load.value[self.current_timestep]],
+                                      dtype=np.float32)
+        }
+        if self.storage is not None:
+            observations.update({'current_soc': np.array(
+                [self.storage.value[self.current_timestep - 1] if self.current_timestep > 0
+                 else self.storage.initial_charge],
+                dtype=np.float32),
+                'charge_max': np.array([self.storage.charge_max],
+                                       dtype=np.float32),
+                'discharge_max': np.array([self.storage.discharge_max],
+                                          dtype=np.float32),
+                'capacity_max': np.array([self.storage.capacity_max],
+                                         dtype=np.float32),
+            })
+
+        return observations
 
     def calculate_reward(self, cost: float, penalty: float) -> float:
         # Calculate the reward
