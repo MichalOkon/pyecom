@@ -3,12 +3,13 @@ import seaborn as sns
 
 
 def plot_per_timestep_logs(data):
-    fig, axs = plt.subplots(nrows=2, ncols=2, figsize=(10, 8))
+    fig, axs = plt.subplots(nrows=2, ncols=3, figsize=(10, 8))
 
     axs = axs.flatten()
 
-    titles = ['Total Imported Energy', 'Total Exported Energy', 'Total SOC', 'Total Produced Energy']
-    colors = ['blue', 'green', 'red', 'purple']
+    titles = ['Total Imported Energy', 'Total Exported Energy', 'Total SOC', 'Total Produced Energy',
+              'Total Locally Imported Energy', 'Total Locally Exported Energy']
+    colors = ['blue', 'green', 'red', 'purple', 'orange', 'brown']
 
     for i, column in enumerate(data.columns):
         axs[i].bar(data.index, data[column], color=colors[i])
@@ -23,7 +24,7 @@ def plot_per_timestep_logs(data):
 def plot_per_household_logs(data):
     sns.set(style="whitegrid")
 
-    fig, axs = plt.subplots(nrows=2, ncols=4, figsize=(16, 12))
+    fig, axs = plt.subplots(nrows=2, ncols=5, figsize=(16, 12))
     axs = axs.flatten()
 
     columns = data.columns

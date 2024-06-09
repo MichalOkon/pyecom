@@ -67,13 +67,6 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         # # Initialize variables for currently available energy
         # self.current_total_available_energy: float = 0
 
-        # Costs for each resource
-        self.total_accumulated_generator_cost: float = 0.0
-        self.total_accumulated_storage_cost: float = 0.0
-        self.total_accumulated_import_cost: float = 0.0
-        self.total_accumulated_export_cost: float = 0.0
-        self.total_accumulated_market_cost: float = 0.0
-
         # Rewards
         self.storage_action_reward = storage_action_reward
 
@@ -82,13 +75,6 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         self.import_penalty = import_penalty
         self.export_penalty = export_penalty
         self.balance_penalty = balance_penalty
-
-        # Set a penalty for each resource
-        self.total_accumulated_generator_penalty: float = 0.0
-        self.total_accumulated_storage_penalty: float = 0.0
-        self.total_accumulated_import_penalty: float = 0.0
-        self.total_accumulated_export_penalty: float = 0.0
-        self.total_accumulated_market_penalty: float = 0.0
 
         # Set record of offers
         self.current_offers_prices = [0.0] * self.num_households
@@ -161,19 +147,6 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         self.current_timestep = 0
         self.current_total_production = 0
         self.current_total_consumption = 0
-
-        # Reset penalties and costs
-        self.total_accumulated_generator_cost = 0.0
-        self.total_accumulated_storage_cost = 0.0
-        self.total_accumulated_import_cost = 0.0
-        self.total_accumulated_export_cost = 0.0
-        self.total_accumulated_market_cost = 0.0
-
-        self.total_accumulated_generator_penalty = 0.0
-        self.total_accumulated_storage_penalty = 0.0
-        self.total_accumulated_import_penalty = 0.0
-        self.total_accumulated_export_penalty = 0.0
-        self.total_accumulated_market_penalty = 0.0
 
         # Clear the history
         self.balance_history = []
@@ -380,11 +353,13 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
 
         return terminateds, truncateds
 
-    def _save_dict_to_csv(self, logs, name):
+    @staticmethod
+    def _save_dict_to_csv(logs, name):
         logs_df = pd.DataFrame(logs)
         logs_df.to_csv(name, index=False)
 
-    def get_current_time(self):
+    @staticmethod
+    def get_current_time():
         return time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
 
     def create_results_directory(self, current_time):
@@ -605,7 +580,7 @@ class Household:
             temp_action_space.update(self._create_storage_actions())
 
         # Aggregator action space
-        temp_action_space.update(self._create_aggregator_actions())
+        # temp_action_space.update(self._create_aggregator_actions())
 
         # Market action space
         temp_action_space.update(self._create_market_actions())
@@ -779,18 +754,19 @@ class Household:
         return cost, penalty
 
     # Create Storage Action Space
-    def _create_storage_actions(self) -> dict:
+    @staticmethod
+    def _create_storage_actions() -> dict:
         """
         Create the action space for the storages
         Will have the following actions:
-        - ctl: control the storage (bool) -> 0/1/2 for none/charge/discharge
-        - value: value to be charged or discharged (float)
+        - storage_action_type: control the storage (bool) -> 0/1/2 for none/charge/discharge
+        - storage_action_value: value to be charged or discharged (float)
         :return: dict
         """
 
         storage_actions = {
-            'ctl': gym.spaces.Discrete(3),
-            'value': gym.spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32)
+            'storage_action_type': gym.spaces.Discrete(3),
+            'storage_action_value': gym.spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32)
         }
 
         return storage_actions
@@ -819,14 +795,14 @@ class Household:
         self.storage.value[self.current_timestep] = self.storage.value[self.current_timestep - 1]
 
         # Idle state
-        if actions['ctl'] == 0:
+        if actions['storage_action_type'] == 0:
             self.storage.charge[self.current_timestep] = 0.0
             self.storage.discharge[self.current_timestep] = 0.0
 
         # Charge state
-        elif actions['ctl'] == 1:
+        elif actions['storage_action_type'] == 1:
             # Percent of the charge_max you're willing to use at a given moment?
-            charge = actions['value'][0]
+            charge = actions['storage_action_value'][0]
 
             # Assert if capacity is not zero
             assert self.storage.capacity_max != 0, "Storage capacity cannot be zero"
@@ -858,7 +834,7 @@ class Household:
 
         # Discharge state
         else:
-            discharge = actions['value'][0]
+            discharge = actions['storage_action_value'][0]
 
             # Assert if capacity is not zero
             assert self.storage.capacity_max != 0, "Storage capacity cannot be zero"
@@ -890,15 +866,15 @@ class Household:
         """
         Create the action space for the aggregator
         Will have the following actions:
-        - ctl: action to take 0/1/2 for none/import/export
-        - value: value to be imported or exported (float)
+        - aggregator_action_type: action to take 0/1/2 for none/import/export
+        - aggregator_action_value: value to be imported or exported (float)
 
         :return: dict
         """
 
         return {
-            'ctl': gym.spaces.Discrete(3),
-            'value': gym.spaces.Box(low=0, high=max(self.aggregator.import_max),
+            'aggregator_action_type': gym.spaces.Discrete(3),
+            'aggregator_action_value': gym.spaces.Box(low=0, high=max(self.aggregator.import_max),
                                     shape=(1,), dtype=np.float32)
         }
 
