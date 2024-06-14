@@ -1,3 +1,4 @@
+import json
 import time
 import os
 from collections import defaultdict
@@ -19,8 +20,8 @@ logging.basicConfig(filename='training_info_logs_{}.log'.format(formatted_time),
                     format='%(asctime)s - %(message)s')
 
 
-class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
-    metadata = {'name': 'EnergyCommunityMultiHouseholdsEnv_v0'}
+class EnergyCommunityMultiHouseholdsEnv_v1(MultiAgentEnv):
+    metadata = {'name': 'EnergyCommunityMultiHouseholdsEnv_v1'}
 
     def __init__(self, households_resources: list[list[BaseResource]],
                  import_penalty,
@@ -30,14 +31,25 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
                  balance_penalty,
                  max_timesteps,
                  saving_dir,
-                 forecasting=True):
+                 trading_phases=1,
+                 forecasting=True,
+                 printing=True,
+                 log_debugging=True):
         super().__init__()
+
+        # Logging
+        self.saving_dir = saving_dir
+        self.printing = printing
+        self.log_debugging = log_debugging
 
         # Define the maximum number of timesteps to simulate
         self.max_timesteps = max_timesteps
 
         # Set the current phase
         self.phase = 1
+
+        self.num_trading_phases = trading_phases
+        self.trading_phase = 0
 
         # Define the resources
         self.households_resources = deepcopy(households_resources)
@@ -80,7 +92,11 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         # Set record of offers
         self.current_offers_prices = [0.0] * self.num_households
         self.current_offers_quantities = [0.0] * self.num_households
-
+        self.historic_offers_prices = []
+        self.historic_offers_quantities = []
+        # Saves all trades that took place between the households in the format:
+        # Price of energy traded - quantity of energy traded - selling household id - buying household id
+        self.historic_traded_logs = defaultdict(list)
         # Balance history
         self.balance_history = []
         self.reward_history = []
@@ -88,8 +104,7 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         # Current real reward
         self.current_real_reward = {}
 
-        # Logging
-        self.saving_dir = saving_dir
+
         # self.total_imported_energy = [0.0] * self.max_timesteps
         # self.total_exported_energy = [0.0] * self.max_timesteps
         # self.total_soc = [0.0] * self.max_timesteps
@@ -106,7 +121,10 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
                                       export_penalty,
                                       storage_action_reward,
                                       storage_action_penalty,
-                                      balance_penalty)
+                                      balance_penalty,
+                                      self.num_trading_phases,
+                                      printing_debug=self.printing,
+                                      log_debugging=self.log_debugging)
 
         return households
 
@@ -146,6 +164,8 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
 
         # Reset environment variables
         self.current_timestep = 0
+        self.trading_phase = 0
+        self.phase = 1
         self.current_total_production = 0
         self.current_total_consumption = 0
 
@@ -218,6 +238,7 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
     def _manage_market_actions(self, actions: dict) -> tuple[dict, dict]:
         info = {}
         self._enter_offers(actions)
+        self._append_market_info()
         cost_per_household = self._exchange_energy()
         # penalty_per_household = self._get_market_penalties()
         penalty_per_household = defaultdict(float)
@@ -254,6 +275,11 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
                 # Calculate the quantity to be exchanged
                 quantity = min(abs(bid[1]), abs(ask[1]))
                 exchange_price = (bid[0] + ask[0]) / 2
+                # Update the traded logs
+                self.historic_traded_logs[self.current_timestep].append(
+                    (float(exchange_price), float(quantity), ask[2], bid[2]))
+                self.print_info(
+                    f"Energy traded at quantity {quantity} at price {exchange_price} from {ask[2]} to {bid[2]}")
                 # Update the energy costs for the households and the available energy
                 self.households[bid[2]].current_available_energy += quantity
                 self.households[ask[2]].current_available_energy -= quantity
@@ -311,9 +337,19 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
         if self.phase == 3:
             self.phase = 1
             self._iterate_timestep()
-        else:
+        elif self.phase == 1:
+            self.trading_phase = 1
             self.phase += 1
+        elif self.phase == 2:
+            if self.trading_phase == self.num_trading_phases:
+                self.phase += 1
+                self.trading_phase = 0
+            else:
+                self.trading_phase += 1
+                self.print_info(f"Entering trading phase {self.trading_phase}")
+                return
 
+        self.print_info(f"Entering phase {self.phase}")
         for household_id in self.households.keys():
             self.households[household_id].current_phase = self.phase
 
@@ -336,6 +372,7 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
                 observations[household_id] = self.households[household_id].get_next_observations()
                 # Shared observations
                 observations[household_id]['current_phase'] = self.phase - 1
+                observations[household_id]['current_trading_phase'] = self.trading_phase
                 observations[household_id]['current_offers_prices'] = np.array(self.current_offers_prices,
                                                                                dtype=np.float32)
                 observations[household_id]['current_offers_quantities'] = np.array(self.current_offers_quantities,
@@ -396,7 +433,7 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
             if self.households[household_id].storage is not None:
                 for timestep in range(self.max_timesteps):
                     total_soc[timestep] += self.households[household_id].storage.value[timestep]
-        return total_imported_energy, total_exported_energy, total_soc, total_produced_energy,\
+        return total_imported_energy, total_exported_energy, total_soc, total_produced_energy, \
             total_locally_imported_energy, total_locally_exported_energy
 
     def calculate_household_values(self):
@@ -440,6 +477,11 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
     def save_logs(self, logs, name):
         self._save_dict_to_csv(logs, name)
 
+    def save_json_logs(self, logs_dict, name):
+        # Save dict to a json file
+        with open(name, 'w') as file:
+            json.dump(logs_dict, file, indent=4)
+
     def _log_and_store_episode_end_values(self):
         current_time = self.get_current_time()
         dir_name = self.create_results_directory(current_time)
@@ -450,16 +492,33 @@ class EnergyCommunityMultiHouseholdsEnv_v0(MultiAgentEnv):
                 'total_soc': total_soc, 'total_produced_energy': total_produced_energy,
                 'total_locally_imported_energy': total_locally_imported_energy,
                 'total_locally_exported_energy': total_locally_exported_energy}
+        historic_offers = {'quantities': self.historic_offers_quantities, 'prices': self.historic_offers_prices}
         self.save_logs(logs, dir_name + '/aggregated_results.csv')
         self.save_logs(accumulated_household_logs, dir_name + '/accumulated_household_logs.csv')
+        self.save_logs(historic_offers, dir_name + '/local_market_bids_asks_logs.csv')
+        self.save_json_logs(self.historic_traded_logs, dir_name + '/local_market_traded_logs.json')
         # self.save_logs(household_logs, dir_name + '/household_logs.csv')
         return logs
+
+    def _append_market_info(self):
+        # Log current trading quantities and prices
+        self.historic_offers_prices.append(deepcopy(self.current_offers_prices))
+        self.historic_offers_quantities.append(deepcopy(self.current_offers_quantities))
+
+    def print_info(self, info):
+        if self.printing:
+            message = f"Environment --- " + info
+            if self.printing:
+                print(message)
+            if self.log_debugging:
+                logging.info(message)
 
 
 class Household:
     def __init__(self, id: int, resources, num_household, import_penalty,
                  export_penalty, storage_action_reward,
-                 storage_action_penalty, balance_penalty, forecasting=True):
+                 storage_action_penalty, balance_penalty, num_trading_phases=1, forecasting=True, printing_debug=True,
+                 log_debugging=True):
         # Track the current timestep
         self.current_timestep = 0
         self.current_phase = 1
@@ -484,6 +543,9 @@ class Household:
 
         # Define max timestep
         self.max_timestep = self.aggregator.exports.shape[0]
+
+        # Define number of trading phases
+        self.num_trading_phases = num_trading_phases
 
         # Initialize variables for production and consumption
         self.current_production: float = 0
@@ -544,6 +606,9 @@ class Household:
         # Whether prices and producton forecasting should be a part of the observation sapce
         self.forecasting = forecasting
 
+        self.printing = printing_debug
+        self.log_debugging = log_debugging
+
     # Handle Observation Space
     def _handle_observation_space(self) -> None:
         # Observation space
@@ -560,6 +625,7 @@ class Household:
             'current_offers_quantities': gym.spaces.Box(low=-99.0, high=99.0, shape=(self.num_households,),
                                                         dtype=np.float32),
             'current_phase': gym.spaces.Discrete(3),
+            'current_trading_phase': gym.spaces.Discrete(self.num_trading_phases + 1)
         }
 
         if self.storage is not None:
@@ -575,16 +641,9 @@ class Household:
         self._action_space_in_preferred_format = True
         temp_action_space = {}
 
-        # Generator action space
-        if self.generator is not None:
-            temp_action_space.update(self._create_generator_actions())
-
         # Storage action space
         if self.storage is not None:
             temp_action_space.update(self._create_storage_actions())
-
-        # Aggregator action space
-        # temp_action_space.update(self._create_aggregator_actions())
 
         # Market action space
         temp_action_space.update(self._create_market_actions())
@@ -604,31 +663,6 @@ class Household:
             'current_offers_price': gym.spaces.Box(low=0.0, high=0.12, shape=(1,), dtype=np.float32),
             'current_offers_quantity': gym.spaces.Box(low=-99.0, high=99.0, shape=(1,), dtype=np.float32)
         }
-
-    # Create Generator Action Space
-    def _create_generator_actions(self) -> dict:
-        """
-        Create the action space for the generators
-        Varies according to the resource's renewable variable
-        Renewable generators will have the following actions:
-        - production (float) -> Renewable generators can control their production
-        Non-renewable generators will have the following actions:
-        - active (bool)
-
-        :return: dict
-        """
-
-        gen = self.generator
-        if gen.is_renewable == 2.0 or gen.is_renewable is True:  # Hack for the Excel file
-            generator_actions = {
-                'production': gym.spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32)
-            }
-        else:
-            generator_actions = {
-                'active': gym.spaces.Discrete(2)
-            }
-
-        return generator_actions
 
     # Perform one step in the environment
     def step(self, action: dict) -> tuple:
@@ -667,13 +701,8 @@ class Household:
         total_penalty = 0
 
         if self.generator is not None:
-            # Execute the actions for the generator
-            generator_cost, generator_penalty = self._execute_generator_actions(actions)
-            self.accumulated_generator_cost += generator_cost
-            self.accumulated_generator_penalty += generator_penalty
-            total_cost += generator_cost
-            # TODO: should there be any penalty for generating power
-            # total_penalty += generator_penalty
+            # Generate energy
+            self._generate_energy()
         if self.storage is not None:
             # Execute the actions for the storage
             storage_cost, storage_penalty = self._execute_storage_actions(actions)
@@ -696,30 +725,24 @@ class Household:
             total_penalty += storage_penalty * self.storage_action_penalty
 
         # Execute the actions for the aggregator (currently actions don't mean anything)
+        retailer_trading_cost = self._execute_aggregator_actions()
         if self.current_available_energy < 0:
-            import_cost, import_penalty = self._execute_aggregator_actions(actions)
+            import_cost = self._execute_aggregator_actions()
 
             self.accumulated_import_cost += import_cost
-            self.accumulated_import_penalty += import_penalty
             total_cost += import_cost
-            total_penalty += import_penalty * self.import_penalty
 
         elif self.current_available_energy > 0:
-            export_cost, export_penalty = self._execute_aggregator_actions(actions)
+            export_cost = self._execute_aggregator_actions()
             self.accumulated_export_cost += export_cost
-            self.accumulated_export_penalty += export_penalty
 
             # Added self.export_penalty myself
             total_cost += export_cost
-            total_penalty += export_penalty * self.export_penalty
-
-        # Add penalty for having too much or too little available energy after all actions
-        total_penalty += self.balance_penalty * abs(self.current_available_energy)
 
         return total_cost, total_penalty
 
     # Execute generator actions
-    def _execute_generator_actions(self, actions) -> tuple[float, float]:
+    def _generate_energy(self):
         """
         Execute the actions for the generators
         :param gen: generator resource
@@ -727,35 +750,21 @@ class Household:
         :return: float
         """
 
-        # Calculate the cost of the generator
-        penalty: float = 0.0
-        cost: float = 0.0
-        # Placeholder for produced energy
-        produced_energy: float = 0.0
-
-        # Check if actions has active or production
-        if 'active' in actions.keys():
-            produced_energy = (actions['active'] *
-                               self.generator.upper_bound[self.current_timestep])
-        elif 'production' in actions.keys():
-            produced_energy = (actions['production'][0] *
-                               self.generator.upper_bound[self.current_timestep])
+        # In all cases, the generation is equal to the maximum possible energy generation value
+        produced_energy: float = self.generator.upper_bound[self.current_timestep]
 
         # Attribute the produced energy to the generator
         self.generator.value[self.current_timestep] = produced_energy
         self.current_production += produced_energy
         self.current_available_energy += produced_energy
 
-        # Update on the resource
-        self.generator.value[self.current_timestep] = produced_energy
-
         # Update the produced energy
         self.produced[self.current_timestep] = produced_energy
 
-        # TODO: penalize for using non-sustainable generators
-        # cost: float = self.generator.upper_bound[self.current_timestep] - produced_energy
+        self.print_household_info("Produced energy: " + str(produced_energy))
+        self.print_household_info("Current available energy: " + str(self.current_available_energy))
 
-        return cost, penalty
+        return produced_energy
 
     # Create Storage Action Space
     @staticmethod
@@ -802,6 +811,7 @@ class Household:
         if actions['storage_action_type'] == 0:
             self.storage.charge[self.current_timestep] = 0.0
             self.storage.discharge[self.current_timestep] = 0.0
+            self.print_household_info("Did not perform any storage action")
 
         # Charge state
         elif actions['storage_action_type'] == 1:
@@ -836,6 +846,9 @@ class Household:
             self.storage.charge[self.current_timestep] = charge
             self.storage.discharge[self.current_timestep] = 0.0
 
+            self.print_household_info(
+                f"Charged {charge} to the total value of {self.storage.value[self.current_timestep]}")
+
         # Discharge state
         else:
             discharge = actions['storage_action_value'][0]
@@ -863,6 +876,9 @@ class Household:
             # Add the energy to the pool
             self.current_available_energy += discharge * self.storage.capacity_max
 
+            self.print_household_info(
+                f"Discharged {discharge} to the total value of {self.storage.value[self.current_timestep]}")
+
         return cost, penalty
 
     # Create Aggregator Action Space
@@ -879,15 +895,15 @@ class Household:
         return {
             'aggregator_action_type': gym.spaces.Discrete(3),
             'aggregator_action_value': gym.spaces.Box(low=0, high=max(self.aggregator.import_max),
-                                    shape=(1,), dtype=np.float32)
+                                                      shape=(1,), dtype=np.float32)
         }
 
     # Execute aggregator actions
-    def _execute_aggregator_actions(self, actions) -> tuple[float, float]:
+    def _execute_aggregator_actions(self) -> float:
         """
         Execute the actions for the aggregator
         :param actions: actions to be executed
-        :return: aggregator costs and penalty
+        :return: aggregator costs
         """
 
         # Set up the aggregator's costs
@@ -898,60 +914,37 @@ class Household:
         # The reward will be the deviation from the bounds, to be later used as a penalty
         penalty: float = 0.0
 
+        to_import = 0.0
+        to_export = 0.0
+
         # If we still have energy left, there is no need to import extra energy
         if self.current_available_energy > 0:
-
-            # TODO: Should overproduction be penalized?
-            # Force to export
-            # 1 - Get the deviation from the bounds
+            # Force to export all available energy
             to_export = self.current_available_energy
-            if to_export > self.aggregator.export_max[self.current_timestep - 1]:
-                deviation = to_export - self.aggregator.export_max[self.current_timestep - 1]
-                to_export = self.aggregator.export_max[self.current_timestep - 1]
-                penalty = deviation
-
-            # 2 - Set the exports for agent and resource
-            self.aggregator.imports[self.current_timestep] = 0.0
-            self.aggregator.exports[self.current_timestep] = to_export
-
-            # 3 - Update the available energy pool
-            self.current_available_energy -= to_export
 
             # Update the cost of the export
             cost = to_export * self.aggregator.export_cost[self.current_timestep - 1]
 
-            # Update the traded energy
-            self.retailer_exports[self.current_timestep] = to_export
-            self.retailer_imports[self.current_timestep] = 0.0
-            return -cost, penalty
+            self.print_household_info(f"Exported {to_export} energy at price {cost}")
 
         # Check if there is a defect of energy that needs to be imported
         if self.current_available_energy < 0:
-
             # If not, we are forced to import
             to_import = abs(self.current_available_energy)
-            if to_import > self.aggregator.import_max[self.current_timestep - 1]:
-                # Calculate the deviation from the bounds
-                deviation = to_import - self.aggregator.import_max[self.current_timestep - 1]
-                to_import = self.aggregator.import_max[self.current_timestep - 1]
-                penalty = deviation
 
-            # Set the imports for agent and resource
-            self.aggregator.imports[self.current_timestep] = to_import
-            self.aggregator.exports[self.current_timestep] = 0.0
-
-            # Update the available energy pool
-            self.current_available_energy += to_import
-
-            # Get the associated costs of importation
+            # Get the associated costs of the import
             cost = to_import * self.aggregator.import_cost[self.current_timestep - 1]
+            self.print_household_info(f"Imported {to_import} energy at price {cost}")
 
-            # Update the traded energy
-            self.retailer_exports[self.current_timestep] = 0.0
-            self.retailer_imports[self.current_timestep] = to_import
-            return cost, penalty
+        self.current_available_energy = 0.0
+        # 2 - Set the exports for agent and resource
+        self.aggregator.imports[self.current_timestep] = to_import
+        self.aggregator.exports[self.current_timestep] = to_export
 
-        return cost, penalty
+        self.retailer_imports[self.current_timestep] = to_import
+        self.retailer_exports[self.current_timestep] = to_export
+
+        return cost
 
     def get_initial_observations(self) -> dict:
         """
@@ -973,7 +966,8 @@ class Household:
                                               dtype=np.float32),
             'current_offers_quantities': np.array([0.0] * self.num_households,
                                                   dtype=np.float32),
-            'current_phase': 0
+            'current_phase': 0,
+            'current_trading_phase': 0
         }
         if self.storage is not None:
             observations['current_soc'] = np.array([self.storage.initial_charge],
@@ -1019,6 +1013,13 @@ class Household:
         if np.isnan(reward):
             logging.error(f"Calculated reward is NaN: cost={cost}, penalty={penalty}")
         return reward
+
+    def print_household_info(self, info):
+        message = f"Household {self.id} --- " + info
+        if self.printing:
+            print(message)
+        if self.log_debugging:
+            logging.info(message)
 
     # # Build the info logs
     # def log_info(self):
