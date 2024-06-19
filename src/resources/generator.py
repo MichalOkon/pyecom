@@ -14,7 +14,8 @@ class Generator(BaseResource):
                  upper_bound: np.array,
                  cost: np.array,
                  cost_nde: np.array,
-                 is_renewable: Union[np.array, bool]):
+                 is_renewable: Union[np.array, bool],
+                 generation_prediction: np.array = None):
         super().__init__(name, value)
 
         self.is_renewable = is_renewable
@@ -28,6 +29,8 @@ class Generator(BaseResource):
         self.lower_bound = lower_bound
         self.upper_bound = upper_bound
         self.cost = cost
+
+        self.generation_prediction = generation_prediction
 
     def sample(self, method: str = 'normal') -> np.array:
         """

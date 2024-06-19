@@ -8,6 +8,8 @@ import pandas as pd
 from src.parsers import BaseParser
 from src.resources import Aggregator, Load, Generator, Storage
 
+import matplotlib.pyplot as plt
+
 
 class PecanParser(BaseParser):
     def __init__(self, timeseries_file_path: str, metadata_file_path: str, prices_file_path: str,
@@ -47,12 +49,8 @@ class PecanParser(BaseParser):
     def get_parsed_resources(self, start_time=None, end_time=None):
         if start_time is None:
             start_time = self.timeseries_data['time'].iloc[0]
-        else:
-            start_time = pd.to_datetime(start_time).to_numpy().astype('datetime64[ns]')
         if end_time is None:
             end_time = self.timeseries_data['time'].iloc[-1]
-        else:
-            end_time = pd.to_datetime(end_time).to_numpy().astype('datetime64[ns]')
 
         relevant_price_data = self.price_data[
             (self.price_data['time'] >= start_time) & (self.price_data['time'] <= end_time)]
@@ -74,8 +72,9 @@ class PecanParser(BaseParser):
     def process_tables(self):
         self.unique_household_ids = self.timeseries_data['dataid'].unique()
         self.metadata = self.metadata[self.metadata['dataid'].isin(self.unique_household_ids)]
+
         # Take relevant columns from both files
-        self.timeseries_data = self.timeseries_data[['dataid', 'local_15min', 'grid', 'solar']]
+        self.timeseries_data = self.timeseries_data[['dataid', 'local_15min', 'grid', 'solar', 'solar2']]
         self.metadata = self.metadata[['dataid', 'pv']]
         self.price_data = self.price_data[['DateTime', 'realtime_lbmp (avg) (nyiso)']]
 
@@ -96,11 +95,14 @@ class PecanParser(BaseParser):
         self.timeseries_data.sort_values(by=['id', 'time'], inplace=True)
 
         # Create a new column for the usage which is the sum of grid and solar
-        self.timeseries_data['usage'] = self.timeseries_data['grid'] + self.timeseries_data['solar']
+        filled_solar1 = self.timeseries_data['solar'].fillna(0)
+        filled_solar2 = self.timeseries_data['solar2'].fillna(0)
+        self.timeseries_data['usage'] = self.timeseries_data['grid'] + filled_solar1 + filled_solar2
+        self.timeseries_data['total_solar'] = filled_solar1 + filled_solar2
 
-        self.timeseries_data['time'] = pd.to_datetime(self.timeseries_data['time']).dt.date
+        self.timeseries_data['time'] = pd.to_datetime(self.timeseries_data['time'])
         self.timeseries_data.reset_index(drop=True, inplace=True)
-        self.price_data['time'] = pd.to_datetime(self.price_data['time']).dt.date
+        self.price_data['time'] = pd.to_datetime(self.price_data['time'])
 
         self.metadata.reset_index(drop=True, inplace=True)
         # Add predictions of prices and pv generation
@@ -120,12 +122,12 @@ class PecanParser(BaseParser):
             household_row_count = np.sum(id_mask)
             # Continue if the household does not have pv
             if (self.metadata[self.metadata['id'] == id]['pv'] != 'yes').any() or pd.isna(
-                    self.timeseries_data.loc[id_mask, 'solar'].iloc[0]):
+                    self.timeseries_data.loc[id_mask, 'total_solar'].iloc[0]):
                 continue
             # Start iterating after 7 days
             for i in range(prediction_start, household_row_count):
                 # print(f"Predicting solar for timestep {i} and household {id}")
-                mean_past_pv = self.timeseries_data.loc[id_mask, 'solar'].iloc[i - prediction_start:i:interval].mean()
+                mean_past_pv = self.timeseries_data.loc[id_mask, 'total_solar'].iloc[i - prediction_start:i:interval].mean()
                 actual_index = self.timeseries_data[id_mask].index[i]
                 self.timeseries_data.at[actual_index, 'pv_prediction'] = mean_past_pv
 
@@ -150,17 +152,19 @@ class PecanParser(BaseParser):
         configuration = []
         # Take buy prices from the price data and sell prices as a minimum between the buy prices and a fixed value
         sell_price = 3.0
-        sell_prices = np.minimum(sell_price, price_data['price'])
-        aggregator_specs = {'buy_prices': price_data['price'].values, 'sell_prices': sell_prices,
-                            'price_prediction': price_data['price_prediction']}
+        sell_prices = np.minimum(sell_price, price_data['price']).reset_index(drop=True)
+        aggregator_specs = {'buy_prices': price_data['price'].values, 'sell_prices': sell_prices.values,
+                            'price_prediction': price_data['price_prediction'].values}
         for id in self.unique_household_ids:
             household_timeseries = timeseries_data[timeseries_data['id'] == id]
 
             print(f"Length of household {id} timeseries", len(household_timeseries))
             # Create pv specs
-            has_pv = (metadata[metadata['id'] == id]['pv'] == 'yes').any()
-            pv_specs = {'present': has_pv, 'values': household_timeseries['solar'].values,
-                        'pv_prediction': household_timeseries['pv_prediction']}
+            has_pv = (metadata[metadata['id'] == id]['pv'] == 'yes').any() and not pd.isna(
+                household_timeseries['solar'].iloc[0])
+
+            pv_specs = {'present': has_pv, 'values': household_timeseries['total_solar'].values,
+                        'pv_prediction': household_timeseries['pv_prediction'].values}
 
             # Hard-coded batteries identical for each household
             battery_specs = self.create_battery_specs()
@@ -220,7 +224,8 @@ class PecanParser(BaseParser):
                                 import_max=1000,
                                 export_max=1000,
                                 import_cost=specs[0]['aggregator']['buy_prices'],
-                                export_cost=specs[0]['aggregator']['sell_prices']
+                                export_cost=specs[0]['aggregator']['sell_prices'],
+                                price_prediction=specs[0]['aggregator']['price_prediction']
                                 )
 
         max_timesteps = aggregator.imports.shape[0]
@@ -244,7 +249,8 @@ class PecanParser(BaseParser):
                                                              upper_bound=spec['generator']['values'],
                                                              cost=np.zeros(spec['generator']['values'].shape),
                                                              cost_nde=np.zeros(spec['generator']['values'].shape),
-                                                             is_renewable=True)
+                                                             is_renewable=True,
+                                                             generation_prediction=spec['generator']['pv_prediction'])
 
             # Add the storage
             household_resources['storage'] = (Storage(name='storage_{:05d}'.format(household_id),
@@ -282,4 +288,24 @@ class PecanParser(BaseParser):
         print(self.price_data.head())
 
     def plot_tables(self):
-        pass
+        # Based on the tables, plot the data. Made take a long time if there are many households
+
+        # Plot the price data
+        plt.plot(self.price_data['time'], self.price_data['price'], label='Price')
+        plt.plot(self.price_data['time'], self.price_data['price_prediction'], label='Price prediction')
+        plt.legend()
+        plt.show()
+        # Plot the timeseries data
+        for id in self.unique_household_ids:
+            print(f"Plotting data for household {id}")
+            household_timeseries = self.timeseries_data[self.timeseries_data['id'] == id]
+            # plt.plot(household_timeseries['time'], household_timeseries['usage'], label=f'Household {id} usage')
+            # plt.plot(household_timeseries['time'], household_timeseries['grid'], label=f'Household {id} grid')
+            # Include the pv prediction if the household has pv
+            if (self.metadata[self.metadata['id'] == id]['pv'] == 'yes').any():
+                plt.plot(household_timeseries['time'], household_timeseries['pv_prediction'],
+                         label=f'Household {id} pv prediction')
+                plt.plot(household_timeseries['time'], household_timeseries['total_solar'], label=f'Household {id} solar',
+                         alpha=0.5)
+                plt.legend()
+                plt.show()

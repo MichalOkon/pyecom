@@ -54,6 +54,8 @@ class EnergyCommunityMultiHouseholdsEnv_v1(MultiAgentEnv):
         # Define the resources
         self.households_resources = deepcopy(households_resources)
 
+        self.forecasting = forecasting
+
         # Initialize households
         self.households = self._create_households(households_resources,
                                                   import_penalty,
@@ -104,7 +106,6 @@ class EnergyCommunityMultiHouseholdsEnv_v1(MultiAgentEnv):
         # Current real reward
         self.current_real_reward = {}
 
-
         # self.total_imported_energy = [0.0] * self.max_timesteps
         # self.total_exported_energy = [0.0] * self.max_timesteps
         # self.total_soc = [0.0] * self.max_timesteps
@@ -124,7 +125,8 @@ class EnergyCommunityMultiHouseholdsEnv_v1(MultiAgentEnv):
                                       balance_penalty,
                                       self.num_trading_phases,
                                       printing_debug=self.printing,
-                                      log_debugging=self.log_debugging)
+                                      log_debugging=self.log_debugging,
+                                      forecasting=self.forecasting)
 
         return households
 
@@ -554,6 +556,9 @@ class Household:
         # Initialize variables for currently available energy
         self.current_available_energy: float = 0
 
+        # Whether prices and production forecasting should be a part of the observation space
+        self.forecasting = forecasting
+
         # Observation space
         self._handle_observation_space()
 
@@ -603,9 +608,6 @@ class Household:
         # Current real reward
         self.current_real_reward = {}
 
-        # Whether prices and producton forecasting should be a part of the observation sapce
-        self.forecasting = forecasting
-
         self.printing = printing_debug
         self.log_debugging = log_debugging
 
@@ -615,12 +617,12 @@ class Household:
         self._obs_space_in_preferred_format = True
         temp_observation_space = {
             'current_available_energy': gym.spaces.Box(low=-99999.0, high=99999.0, shape=(1,), dtype=np.float32),
-            'current_buy_price': gym.spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32),
-            'current_sell_price': gym.spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32),
+            'current_buy_price': gym.spaces.Box(low=-100, high=100.0, shape=(1,), dtype=np.float32),
+            'current_sell_price': gym.spaces.Box(low=-100, high=100.0, shape=(1,), dtype=np.float32),
             'current_loads': gym.spaces.Box(low=0, high=99999.0, shape=(1,), dtype=np.float32),
             # Add the market observation space for bidding
             # TODO: Change it from being hardcoded
-            'current_offers_prices': gym.spaces.Box(low=0.0, high=0.12, shape=(self.num_households,),
+            'current_offers_prices': gym.spaces.Box(low=0.0, high=100.0, shape=(self.num_households,),
                                                     dtype=np.float32),
             'current_offers_quantities': gym.spaces.Box(low=-99.0, high=99.0, shape=(self.num_households,),
                                                         dtype=np.float32),
@@ -631,6 +633,16 @@ class Household:
         if self.storage is not None:
             temp_observation_space.update(
                 {'current_soc': gym.spaces.Box(low=0, high=1.0, shape=(1,), dtype=np.float32)})
+
+        if self.forecasting:
+            temp_observation_space.update({
+                'forecasted_buy_price': gym.spaces.Box(low=-100, high=100.0, shape=(4 * 24,), dtype=np.float32),
+
+            })
+            if self.generator is not None:
+                temp_observation_space.update({
+                    'forecasted_generation': gym.spaces.Box(low=-50, high=50.0, shape=(4 * 24,), dtype=np.float32),
+                })
 
         # Set the observation space
         self.observation_space = gym.spaces.Dict(temp_observation_space)
@@ -894,7 +906,7 @@ class Household:
 
         return {
             'aggregator_action_type': gym.spaces.Discrete(3),
-            'aggregator_action_value': gym.spaces.Box(low=0, high=max(self.aggregator.import_max),
+            'aggregator_action_value': gym.spaces.Box(low=0, high=self.aggregator.import_max,
                                                       shape=(1,), dtype=np.float32)
         }
 
@@ -960,7 +972,7 @@ class Household:
                                           dtype=np.float32),
             'current_sell_price': np.array([self.aggregator.export_cost[0]],
                                            dtype=np.float32),
-            'current_loads': np.array([self.load.value[0]],
+            'current_loads': np.array([self.load.value[0]] if not np.isnan(self.load.value[0]) else [0.0],
                                       dtype=np.float32),
             'current_offers_prices': np.array([0.0] * self.num_households,
                                               dtype=np.float32),
@@ -972,6 +984,23 @@ class Household:
         if self.storage is not None:
             observations['current_soc'] = np.array([self.storage.initial_charge],
                                                    dtype=np.float32)
+        if self.forecasting:
+            observations.update({
+                'forecasted_buy_price': np.array(self.aggregator.price_prediction[1:97],
+                                                 dtype=np.float32)})
+            if self.generator is not None:
+                # if np.isnan(self.generator.generation_prediction[
+                #             self.current_timestep + 1: self.current_timestep + 97]).any():
+                #     logging.error(
+                #         f"Generation prediction is NaN: {self.generator.generation_prediction}"
+                #         f" at timestep {self.current_timestep} for household {self.id}")
+                #     print(
+                #         f"Generation prediction is NaN: {self.generator.generation_prediction}"
+                #         f" at timestep {self.current_timestep} for household {self.id}")
+                observations.update({'forecasted_generation': np.array(self.generator.generation_prediction[1:97],
+                                                                       dtype=np.float32)})
+        self.assert_no_nan(observations)
+
         return observations
 
     # Get observations
@@ -1004,8 +1033,34 @@ class Household:
                 dtype=np.float32),
             })
 
+        if self.forecasting:
+            observations.update({
+                'forecasted_buy_price': np.array(
+                    self.aggregator.price_prediction[self.current_timestep + 1: self.current_timestep + 97],
+                    dtype=np.float32)})
+            if self.generator is not None:
+                # Check if any value is nan
+                # if np.isnan(self.generator.generation_prediction[
+                #             self.current_timestep + 1: self.current_timestep + 97]).any():
+                #     logging.error(
+                #         f"Generation prediction is NaN: {self.generator.generation_prediction[self.current_timestep + 1: self.current_timestep + 97]}"
+                #         f" at timestep {self.current_timestep} for household {self.id}")
+                #     print(
+                #         f"Generation prediction is NaN: {self.generator.generation_prediction[self.current_timestep + 1: self.current_timestep + 97]}"
+                #         f" at timestep {self.current_timestep} for household {self.id}")
+                observations.update({'forecasted_generation': np.array(
+                    self.generator.generation_prediction[self.current_timestep + 1: self.current_timestep + 97],
+                    dtype=np.float32)})
+
+        # self.assert_no_nan(observations)
         return observations
 
+    def assert_no_nan(self, observation):
+        # Check if no values used in the observation are nan
+        for key in observation.keys():
+            if np.isnan(observation[key]).any():
+                logging.error(f"Observation {key} value is NaN: {observation[key]} at timestep {self.current_timestep} for household {self.id}")
+                print(f"Observation {key} value is NaN: {observation[key]} at timestep {self.current_timestep} for household {self.id}")
     def calculate_reward(self, cost: float, penalty: float) -> float:
         # Calculate the reward
         reward = - cost - penalty

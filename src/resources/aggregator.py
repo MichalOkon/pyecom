@@ -15,7 +15,8 @@ class Aggregator():
                  import_cost: np.array,
                  export_cost: np.array,
                  import_max: np.array,
-                 export_max: np.array):
+                 export_max: np.array,
+                 price_prediction: np.array = None):
         self.name = name
 
         self.imports = imports
@@ -26,6 +27,8 @@ class Aggregator():
 
         self.import_cost = import_cost
         self.export_cost = export_cost
+
+        self.price_prediction = price_prediction
 
     def __repr__(self):
         return f'{self.name}'

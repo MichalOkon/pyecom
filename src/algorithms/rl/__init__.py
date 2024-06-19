@@ -14,5 +14,7 @@ from .ec_multiagent_sequential_v0 import EnergyCommunitySequentialV0
 from .ec_multiagent_sequential_v1 import EnergyCommunitySequentialV1
 
 from .ec_households_multiagent_v0 import EnergyCommunityMultiHouseholdsEnv_v0
+from .ec_households_multiagent_v1 import EnergyCommunityMultiHouseholdsEnv_v1
+
 from .ec_households_multiagent_v0 import Household
 from .utils import *

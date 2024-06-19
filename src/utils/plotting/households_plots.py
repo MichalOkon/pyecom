@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
-def plot_per_timestep_logs(data):
+def plot_per_timestep_logs(data, import_prices, export_prices):
     fig, axs = plt.subplots(nrows=2, ncols=3, figsize=(10, 8))
 
     axs = axs.flatten()
@@ -16,6 +16,13 @@ def plot_per_timestep_logs(data):
         axs[i].set_title(titles[i])
         axs[i].set_xlabel('Timestep')
         axs[i].set_ylabel(column)
+
+    # Overlay the import and export pirces
+    for ax in axs:
+        ax2 = ax.twinx()
+        ax2.plot(import_prices, color='red', linestyle='--')
+        ax2.plot(export_prices, color='green', linestyle='--')
+        ax2.set_ylabel('Price')
 
     plt.tight_layout()
     plt.show()
